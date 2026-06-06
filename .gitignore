@@ -1,0 +1,27 @@
+﻿# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+
+# Electron userData (sessions, accounts - personal data, do not share)
+userData/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+
+# Env files (secrets)
+.env
+.env.*
+
+# Playwright browsers (large, auto-downloaded)
+playwright-browsers/
