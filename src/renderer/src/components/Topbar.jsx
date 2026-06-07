@@ -5,6 +5,7 @@ import { runWorkflow } from '../engine/executor.js';
 
 export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }) {
   const projectName = useStore(s => s.projectName);
+  const workflowFilePath = useStore(s => s.workflowFilePath);
   const setProjectName = useStore(s => s.setProjectName);
   const running = useStore(s => s.running);
   const nodes = useStore(s => s.nodes);
@@ -17,17 +18,26 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }
   }
 
   async function onSave() {
-    const wf = useStore.getState().toJSON();
-    const res = await window.obsidian.saveWorkflow(wf);
-    if (res.ok) console.log('Saved:', res.path);
+    const { toJSON, workflowFilePath: filePath, setWorkflowFilePath, pushToast } = useStore.getState();
+    const res = await window.obsidian.saveWorkflow(toJSON(), filePath || undefined);
+    if (res.ok && res.path) {
+      setWorkflowFilePath(res.path);
+      const name = res.path.split(/[/\\]/).pop();
+      pushToast(filePath ? `Đã lưu · ${name}` : `Đã lưu file mới · ${name}`, 'success');
+    }
   }
 
   async function onLoad() {
     const res = await window.obsidian.loadWorkflow();
-    if (res.ok) useStore.getState().loadJSON(res.workflow);
+    if (res.ok) {
+      useStore.getState().loadJSON(res.workflow, res.path);
+      const name = res.path?.split(/[/\\]/).pop() || 'workflow';
+      useStore.getState().pushToast(`Đã mở · ${name}`, 'info');
+    }
   }
 
   const bridgesNeedSetup = nodes.filter(n => n.data.kind === 'bridge' && !(n.data.actions || []).length).length;
+  const clickSeqNeedSetup = nodes.filter(n => n.data.kind === 'click_seq' && !(n.data.steps || []).length).length;
   const emptyAccounts = accounts.filter(a => a.creditStatus === 'empty').length;
   const totalAccounts = accounts.length;
 
@@ -59,12 +69,27 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }
           </span>
         )}
         <span className="status"><span className="status-dot" />{nodes.length}</span>
+        {workflowFilePath && (
+          <span
+            className="status"
+            title={workflowFilePath}
+            style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.7 }}
+          >
+            · {workflowFilePath.split(/[/\\]/).pop()}
+          </span>
+        )}
       </div>
 
       {/* Bridge setup warning — chỉ hiện khi có vấn đề */}
       {bridgesNeedSetup > 0 && (
         <div className="topbar-warning" title={`${bridgesNeedSetup} Bridge node chưa được record`}>
           ⚠ {bridgesNeedSetup} setup
+        </div>
+      )}
+
+      {clickSeqNeedSetup > 0 && (
+        <div className="topbar-warning" title={`${clickSeqNeedSetup} Click Sequence chưa có steps`}>
+          ⚠ {clickSeqNeedSetup} clicks
         </div>
       )}
 
@@ -87,7 +112,8 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }
       {/* Workflow actions */}
       <button className="btn btn-icon" onClick={onNewWorkflow} title="Workflow mới / Templates">＋</button>
       <button className="btn btn-icon" onClick={onLoad} title="Mở workflow (.json)">📂</button>
-      <button className="btn btn-icon" onClick={onSave} title="Lưu workflow">💾</button>
+      <button className="btn btn-icon" onClick={onSave}
+        title={workflowFilePath ? `Lưu vào ${workflowFilePath}` : 'Lưu workflow (chọn file mới)'}>💾</button>
 
       <button className="btn btn-primary" onClick={onRun} disabled={running}
         style={{ padding: '7px 16px', fontSize: 11, letterSpacing: '0.04em' }}

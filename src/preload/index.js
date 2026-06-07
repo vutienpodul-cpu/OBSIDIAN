@@ -5,10 +5,12 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 const api = {
   // Workflow file I/O
-  saveWorkflow: (workflow) => ipcRenderer.invoke('workflow:save', workflow),
+  saveWorkflow: (workflow, filePath) => ipcRenderer.invoke('workflow:save', { workflow, filePath }),
   loadWorkflow: () => ipcRenderer.invoke('workflow:load'),
   saveOutput: (payload) => ipcRenderer.invoke('output:save', payload),
   openPath: (p) => ipcRenderer.invoke('shell:open-path', p),
+  pickFolder: (defaultPath) => ipcRenderer.invoke('dialog:pick-folder', { defaultPath }),
+  exportFiles: (payload) => ipcRenderer.invoke('export:write-files', payload),
 
   // AI BRIDGE (Playwright) — sessionId is optional, falls back to nodeId
   bridge: {
@@ -22,6 +24,7 @@ const api = {
     runSteps:      (nodeId, steps, injectMap, sessionId) => ipcRenderer.invoke('bridge:run-steps', { nodeId, steps, injectMap, sessionId }),
     checkSelector: (nodeId, selector, sessionId)      => ipcRenderer.invoke('bridge:check-selector', { nodeId, selector, sessionId }),
     close:         (nodeId, sessionId)                => ipcRenderer.invoke('bridge:close', { nodeId, sessionId }),
+    isOpen:        (nodeId, sessionId)                => ipcRenderer.invoke('bridge:is-open', { nodeId, sessionId }),
     onEvent:       (cb) => {
       const handler = (_e, payload) => cb(payload);
       ipcRenderer.on('bridge:event', handler);

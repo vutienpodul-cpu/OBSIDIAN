@@ -138,13 +138,19 @@ function ObsidianNode({ data, selected }) {
         ))}
 
         {/* Output preview */}
-        {data._output && Array.isArray(data._output) && data._output.length > 0 && (
-          <div className="node-preview">
-            {data._output[0] && /\.(png|jpg|jpeg|webp|gif)/i.test(data._output[0])
-              ? <img src={data._output[0]} alt="preview" />
-              : <span>{data._output.length} outputs ready</span>}
-          </div>
-        )}
+        {(() => {
+          const previewItems = data._output?.items
+            ?? (Array.isArray(data._output) ? data._output : []);
+          const first = previewItems[0];
+          if (!first) return null;
+          return (
+            <div className="node-preview">
+              {typeof first === 'string' && /\.(png|jpg|jpeg|webp|gif)/i.test(first)
+                ? <img src={first} alt="preview" />
+                : <span>{previewItems.length} outputs ready</span>}
+            </div>
+          );
+        })()}
 
         {data.tags && data.tags.length > 0 && (
           <div className="tag-row">

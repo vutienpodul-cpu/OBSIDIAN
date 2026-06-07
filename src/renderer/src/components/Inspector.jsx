@@ -3,16 +3,21 @@ import { useStore } from '../store.js';
 import { DEFS_BY_KIND, CATEGORIES } from '../data/nodeDefs.js';
 import { useAccountStore } from '../store/accountStore.js';
 import { getGuide } from '../data/nodeGuides.js';
+import {
+  resolveUrlForClickSeq,
+  findPromptTextFromGraph,
+  buildInjectMap,
+  prepareStepsForRun,
+  shortHost,
+} from '../engine/workflowUtils.js';
 
 export default function Inspector() {
   const selectedId = useStore(s => s.selectedId);
   const node = useStore(s => s.nodes.find(n => n.id === selectedId));
   const updateNodeData = useStore(s => s.updateNodeData);
   const removeNode = useStore(s => s.removeNode);
-  const [tab, setTab] = useState('properties');
-
-  // Reset tab when switching nodes
-  useEffect(() => { setTab('guide'); }, [selectedId]);
+  const inspectorTabByNodeId = useStore(s => s.inspectorTabByNodeId);
+  const setInspectorTab = useStore(s => s.setInspectorTab);
 
   if (!node) {
     return (
@@ -43,10 +48,11 @@ export default function Inspector() {
   const tabs = isBridge
     ? ['guide', 'props', 'record', 'accts', 'output', 'log']
     : isClickSeq
-    ? ['guide', 'clicks', 'output', 'log']
+    ? ['guide', 'props', 'clicks', 'output', 'log']
     : ['guide', 'props', 'data', 'output', 'log'];
 
   const TAB_LABELS = { guide:'📖 guide', props:'props', record:'record', accts:'accts', output:'output', log:'log', data:'data', clicks:'👆 clicks' };
+  const tab = inspectorTabByNodeId[node.id] ?? 'guide';
 
   return (
     <aside className="inspector">
@@ -66,7 +72,7 @@ export default function Inspector() {
 
       <div className="insp-tabs">
         {tabs.map(t => (
-          <div key={t} data-tab={t} className={`insp-tab ${tab === t ? 'active' : ''}`} onClick={() => setTab(t)}>
+          <div key={t} data-tab={t} className={`insp-tab ${tab === t ? 'active' : ''}`} onClick={() => setInspectorTab(node.id, t)}>
             {TAB_LABELS[t] || t}
           </div>
         ))}
@@ -74,8 +80,20 @@ export default function Inspector() {
 
       <div className="insp-body">
         {tab === 'guide'  && <GuideTab kind={node.data.kind} />}
-        {tab === 'props'  && <PropertiesTab def={def} data={node.data} onChange={(k, v) => updateNodeData(node.id, { [k]: v })} />}
-        {tab === 'clicks' && isClickSeq && <ClickSeqTab node={node} updateData={p => updateNodeData(node.id, p)} />}
+        {tab === 'props'  && (
+          <PropertiesTab
+            def={isClickSeq
+              ? { ...def, schema: def.schema.filter(f => !['steps', 'sessionId', 'delay'].includes(f.key)) }
+              : def}
+            data={node.data}
+            onChange={(k, v) => updateNodeData(node.id, { [k]: v })}
+          />
+        )}
+        {isClickSeq && (
+          <div style={{ display: tab === 'clicks' ? 'block' : 'none' }}>
+            <ClickSeqTab node={node} updateData={p => updateNodeData(node.id, p)} />
+          </div>
+        )}
         {tab === 'record' && isBridge && <RecordingTab node={node} updateData={p => updateNodeData(node.id, p)} />}
         {tab === 'accts'  && isBridge && <AccountsTab  node={node} updateData={p => updateNodeData(node.id, p)} />}
         {tab === 'output' && <OutputTab data={node.data} />}
@@ -120,6 +138,42 @@ function Field({ field, value, onChange }) {
         <div className="insp-field">
           <div className="insp-label"><span>{label}</span><span className="hint">{key}</span></div>
           <input className="insp-input" type="text" value={value || ''} onChange={e => onChange(e.target.value)} />
+        </div>
+      );
+    case 'folder':
+      return (
+        <div className="insp-field">
+          <div className="insp-label"><span>{label}</span><span className="hint">{key}</span></div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'stretch' }}>
+            <input
+              className="insp-input"
+              type="text"
+              style={{ flex: 1, minWidth: 0 }}
+              value={value || ''}
+              onChange={e => onChange(e.target.value)}
+              placeholder="Chọn thư mục lưu file export..."
+            />
+            <button
+              type="button"
+              className="btn"
+              style={{ flexShrink: 0, padding: '0 12px' }}
+              title="Chọn folder"
+              onClick={async () => {
+                try {
+                  if (typeof window.obsidian?.pickFolder !== 'function') {
+                    alert('Chưa load pickFolder — hãy restart app (npm run dev).');
+                    return;
+                  }
+                  const res = await window.obsidian.pickFolder(value || undefined);
+                  if (res.ok && res.path) onChange(res.path);
+                } catch (e) {
+                  alert('Không mở được folder picker: ' + (e.message || e));
+                }
+              }}
+            >
+              📁 Browse
+            </button>
+          </div>
         </div>
       );
     case 'textarea':
@@ -444,38 +498,79 @@ function RecordingTab({ node, updateData }) {
 
 // ─── Click Sequence Tab ──────────────────────────────────────────────────
 function ClickSeqTab({ node, updateData }) {
+  const nodes = useStore(s => s.nodes);
+  const edges = useStore(s => s.edges);
+  const bridgeSessionOpen = useStore(s => s.bridgeSessionOpen);
+  const setBridgeSessionOpen = useStore(s => s.setBridgeSessionOpen);
   const data = node.data;
   const steps = Array.isArray(data.steps) ? data.steps : [];
   const [picking, setPicking] = useState(false);
-  const [runState, setRunState] = useState('idle'); // idle | running | done | error
+  const [runState, setRunState] = useState('idle');
   const [runError, setRunError] = useState('');
-  const [browserOpen, setBrowserOpen] = useState(false);
 
   const sessionId = data.sessionId || node.id;
+  const browserOpen = !!bridgeSessionOpen[sessionId];
+  const resolvedUrl = resolveUrlForClickSeq(node, nodes, edges);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await window.obsidian.bridge.isOpen(node.id, sessionId);
+        if (!cancelled && res?.ok) setBridgeSessionOpen(sessionId, res.open);
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [node.id, sessionId, setBridgeSessionOpen]);
+
+  async function syncBrowserOpen() {
+    try {
+      const res = await window.obsidian.bridge.isOpen(node.id, sessionId);
+      if (res?.ok) {
+        setBridgeSessionOpen(sessionId, res.open);
+        return res.open;
+      }
+    } catch {}
+    return !!bridgeSessionOpen[sessionId];
+  }
+
+  async function ensureBrowserOpen() {
+    if (bridgeSessionOpen[sessionId]) return true;
+    return syncBrowserOpen();
+  }
 
   async function openBrowser() {
-    const urlNode = null; // Will use sessionId-based session
-    const url = data._upstreamUrl || 'about:blank';
-    const res = await window.obsidian.bridge.open(node.id, url, sessionId);
-    if (res.ok) setBrowserOpen(true);
-    else alert('Không mở được browser: ' + res.error);
+    const url = resolvedUrl || 'about:blank';
+    try {
+      const res = await window.obsidian.bridge.open(node.id, url, sessionId);
+      if (res.ok) setBridgeSessionOpen(sessionId, true);
+      else alert('Không mở được browser: ' + (res.error || 'Unknown'));
+    } catch (e) {
+      alert('Không mở được browser: ' + e.message);
+    }
   }
 
   async function closeBrowser() {
     await window.obsidian.bridge.close(node.id, sessionId);
-    setBrowserOpen(false);
+    setBridgeSessionOpen(sessionId, false);
   }
 
   async function pickClick() {
-    if (!browserOpen) { alert('Nhấn OPEN BROWSER trước.'); return; }
+    if (!(await ensureBrowserOpen())) {
+      alert('Nhấn OPEN BROWSER trước.');
+      return;
+    }
     setPicking(true);
     const stepNum = steps.length + 1;
     const res = await window.obsidian.bridge.captureClick(node.id, stepNum, sessionId);
     setPicking(false);
     if (!res.ok) { alert('Không capture được: ' + res.error); return; }
     const info = res.info;
+    const stepType = info.action === 'right_click'
+      ? 'right_click'
+      : (info.isInput ? 'type' : 'click');
     const newStep = {
-      type: info.isInput ? 'type' : 'click',
+      type: stepType,
       selector: info.selector,
       label: info.text || info.tag || `step ${stepNum}`,
       value: '',
@@ -508,60 +603,54 @@ function ClickSeqTab({ node, updateData }) {
   }
 
   async function runTest() {
-    if (!browserOpen) { alert('Nhấn OPEN BROWSER trước.'); return; }
+    if (!(await ensureBrowserOpen())) {
+      alert('Nhấn OPEN BROWSER trước.');
+      return;
+    }
     setRunState('running'); setRunError('');
-    const res = await window.obsidian.bridge.runSteps(node.id, steps, {}, sessionId);
+    const stepsToRun = prepareStepsForRun(steps, resolvedUrl);
+    const promptText = findPromptTextFromGraph(node.id, nodes, edges);
+    const injectMap = buildInjectMap(stepsToRun, promptText);
+    const res = await window.obsidian.bridge.runSteps(node.id, stepsToRun, injectMap, sessionId);
     if (res.ok) setRunState('done');
     else { setRunState('error'); setRunError(res.error || 'Unknown error'); }
     setTimeout(() => setRunState('idle'), 3000);
+  }
+
+  function urlBanner() {
+    if (resolvedUrl) {
+      return (
+        <div style={{ fontSize: 9.5, color: 'var(--signal)', padding: '6px 0', lineHeight: 1.5 }}>
+          URL: <code style={{ color: 'var(--rose-gold)' }}>{shortHost(resolvedUrl)}</code>
+          <span style={{ color: 'var(--text-dim)' }}> · {resolvedUrl.slice(0, 48)}{resolvedUrl.length > 48 ? '…' : ''}</span>
+        </div>
+      );
+    }
+    return (
+      <div style={{ fontSize: 9.5, color: 'var(--danger)', padding: '6px 0', lineHeight: 1.5 }}>
+        Chưa có URL — nối URL Source hoặc điền Fallback URL (tab props)
+      </div>
+    );
   }
 
   function copyJson() {
     navigator.clipboard.writeText(JSON.stringify(steps, null, 2));
   }
 
-  // ─── Empty state wizard ──────────────────────────────────────────────
-  if (steps.length === 0 && !picking) {
-    return (
-      <div className="cs-wrap">
-        <div className="cs-empty-hint">
-          <div className="cs-empty-icon">👆</div>
-          <div className="cs-empty-title">Chưa có bước nào</div>
-          <div className="cs-empty-body">
-            Mở browser, sau đó nhấn "Pick Click" để bắt đầu ghi từng thao tác.<br/>
-            App sẽ highlight element khi bạn di chuột và ghi lại khi bạn click.
-          </div>
-        </div>
-
-        <div className="insp-group">
-          <div className="insp-group-title">BROWSER SESSION</div>
-          <div className="cs-session-row">
-            <div className="insp-field" style={{ flex: 1 }}>
-              <div className="insp-label"><span>Session ID</span><span className="hint">riêng biệt</span></div>
-              <input className="insp-input" value={data.sessionId || ''} placeholder={node.id}
-                onChange={e => updateData({ sessionId: e.target.value })} />
-            </div>
-          </div>
-          <button className="btn btn-primary" style={{ width: '100%', marginTop: 8 }} onClick={openBrowser}>
-            🌐 OPEN BROWSER
-          </button>
-          <div className="wizard-hint">Login vào website 1 lần — session lưu mãi mãi.</div>
-        </div>
-
-        {browserOpen && (
-          <button className="btn btn-primary" style={{ width: '100%' }} onClick={pickClick} disabled={picking}>
-            {picking ? '⏳ Đang đợi bạn click trên browser...' : '📍 Pick Click 1'}
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  // ─── Steps list UI ───────────────────────────────────────────────────
-  const STEP_COLORS = { click: '#DC2855', type: '#4A90E2', wait: '#94A3B8', goto: '#14B8A6', press: '#8B5CF6' };
+  const STEP_COLORS = { click: '#DC2855', right_click: '#F97316', type: '#4A90E2', wait: '#94A3B8', goto: '#14B8A6', press: '#8B5CF6' };
 
   return (
     <div className="cs-wrap">
+      {steps.length === 0 && !picking && (
+        <div className="cs-empty-hint" style={{ marginBottom: 12 }}>
+          <div className="cs-empty-icon">👆</div>
+          <div className="cs-empty-title">Chưa có bước nào</div>
+          <div className="cs-empty-body">
+            Mở browser → Pick Click (trái/phải) để ghi từng thao tác.
+          </div>
+        </div>
+      )}
+
       {/* Browser controls */}
       <div className="insp-group">
         <div className="insp-group-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -570,6 +659,7 @@ function ClickSeqTab({ node, updateData }) {
             {browserOpen ? '● OPEN' : '○ closed'}
           </span>
         </div>
+        {urlBanner()}
         <div className="rec-controls">
           {!browserOpen
             ? <button className="btn btn-primary" style={{ flex: 1 }} onClick={openBrowser}>🌐 OPEN</button>
@@ -579,7 +669,7 @@ function ClickSeqTab({ node, updateData }) {
             style={{ flex: 1,
               background: runState === 'done' ? 'var(--signal)' :
                           runState === 'error' ? 'var(--danger)' : undefined }}
-            onClick={runTest} disabled={!browserOpen || runState === 'running' || steps.length === 0}>
+            onClick={runTest} disabled={runState === 'running' || steps.length === 0}>
             {runState === 'running' ? '⏳ Running...' :
              runState === 'done'    ? '✓ Done' :
              runState === 'error'   ? '✗ Error' : '▶ RUN TEST'}
@@ -604,12 +694,18 @@ function ClickSeqTab({ node, updateData }) {
               <select className="cs-type-sel" value={step.type}
                 onChange={e => updateStep(i, { type: e.target.value })}>
                 <option value="click">click</option>
+                <option value="right_click">right click</option>
                 <option value="type">type</option>
                 <option value="wait">wait</option>
                 <option value="press">press</option>
                 <option value="goto">goto</option>
               </select>
-              <span className="cs-step-label" title={step.selector}>{step.label || step.selector?.slice(0, 28) || '—'}</span>
+              <span className="cs-step-label" title={step.selector}>
+                {step.label || step.selector?.slice(0, 28) || '—'}
+                {step.type === 'type' && !step.value && (
+                  <span style={{ marginLeft: 6, fontSize: 8, color: 'var(--signal)', fontWeight: 700 }}>INJECT</span>
+                )}
+              </span>
               <button className="cs-btn-sm" onClick={() => moveStep(i, -1)} disabled={i === 0} title="Lên">↑</button>
               <button className="cs-btn-sm" onClick={() => moveStep(i, 1)} disabled={i === steps.length - 1} title="Xuống">↓</button>
               <button className="cs-btn-sm danger" onClick={() => deleteStep(i)} title="Xóa">✕</button>
@@ -645,16 +741,17 @@ function ClickSeqTab({ node, updateData }) {
 
       {/* Add step controls */}
       <div className="cs-add-row">
-        <button className="btn btn-primary" style={{ flex: 2 }} onClick={pickClick} disabled={!browserOpen || picking}>
+        <button className="btn btn-primary" style={{ flex: 2 }} onClick={pickClick} disabled={picking}>
           {picking ? '⏳ Click trên browser...' : '📍 Pick Click ' + (steps.length + 1)}
         </button>
+        <button className="btn" style={{ flex: 1 }} onClick={() => addManualStep('right_click')} title="Thêm right click thủ công">+ R-click</button>
         <button className="btn" style={{ flex: 1 }} onClick={() => addManualStep('wait')} title="Thêm bước chờ">+ wait</button>
         <button className="btn" style={{ flex: 1 }} onClick={() => addManualStep('goto')} title="Thêm bước điều hướng">+ goto</button>
       </div>
 
       {picking && (
         <div className="rec-live-indicator">
-          <span className="rec-dot" /> Đang chờ — hãy click vào element trên browser
+          <span className="rec-dot" /> Đang chờ — click trái hoặc phải vào element trên browser
         </div>
       )}
 
@@ -686,7 +783,44 @@ function WizardStep({ num, done, label, desc }) {
 
 function OutputTab({ data }) {
   const out = data._output;
-  if (!out || (Array.isArray(out) && out.length === 0)) {
+
+  if (out?.type === 'export') {
+    const saved = out.saved || [];
+    return (
+      <div className="insp-group">
+        <div className="insp-group-title">EXPORT · {out.count ?? saved.length} file(s)</div>
+        <div style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.6, marginBottom: 10 }}>
+          Format: <span style={{ color: 'var(--rose-gold)' }}>{out.format}</span><br/>
+          Folder: <code style={{ color: 'var(--signal)', fontSize: 9.5, wordBreak: 'break-all' }}>{out.folderPath}</code>
+        </div>
+        {out.folderPath && (
+          <button
+            className="btn btn-primary"
+            style={{ width: '100%', marginBottom: 10, justifyContent: 'center' }}
+            onClick={() => window.obsidian.openPath(out.folderPath)}
+          >
+            📂 Mở folder
+          </button>
+        )}
+        {saved.length === 0 ? (
+          <div className="insp-empty" style={{ padding: 16 }}>Chưa có file nào được lưu.</div>
+        ) : saved.map((p, i) => (
+          <div className="action-item" key={i}>
+            <span className="kind">file</span>
+            <span className="sel" title={p}>{p.split(/[/\\]/).pop()}</span>
+          </div>
+        ))}
+        {(out.errors || []).length > 0 && (
+          <div style={{ marginTop: 10, fontSize: 9.5, color: 'var(--danger)' }}>
+            {out.errors.length} lỗi khi export — xem ExecLog.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const items = out?.items ?? (Array.isArray(out) ? out : out ? [out] : []);
+  if (!items.length) {
     return (
       <div className="insp-empty" style={{ padding: 30 }}>
         <div className="insp-empty-icon">⌬</div>
@@ -697,8 +831,8 @@ function OutputTab({ data }) {
   }
   return (
     <div className="insp-group">
-      <div className="insp-group-title">OUTPUT · {Array.isArray(out) ? out.length + ' items' : '1 item'}</div>
-      {(Array.isArray(out) ? out : [out]).map((item, i) => (
+      <div className="insp-group-title">OUTPUT · {items.length} items</div>
+      {items.map((item, i) => (
         <div key={i} style={{ marginBottom: 8 }}>
           {typeof item === 'string' && /^https?:.*\.(png|jpg|jpeg|webp|gif)/i.test(item)
             ? <img src={item} alt={`out-${i}`} style={{ width: '100%', borderRadius: 5, border: '1px solid var(--border-subtle)' }} />

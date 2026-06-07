@@ -8,6 +8,7 @@ import ExecLog from './components/ExecLog.jsx';
 import TemplateGallery from './components/TemplateGallery.jsx';
 import AccountManager from './components/AccountManager.jsx';
 import TempMailPanel from './components/TempMailPanel.jsx';
+import ToastStack from './components/ToastStack.jsx';
 import { useStore } from './store.js';
 import { useAccountStore } from './store/accountStore.js';
 
@@ -42,6 +43,7 @@ export default function App() {
       {showGallery   && <TemplateGallery  onClose={() => setShowGallery(false)} />}
       {showAccounts  && <AccountManager   onClose={() => setShowAccounts(false)} />}
       {showTempMail  && <TempMailPanel    onClose={() => setShowTempMail(false)} />}
+      <ToastStack />
     </div>
   );
 }

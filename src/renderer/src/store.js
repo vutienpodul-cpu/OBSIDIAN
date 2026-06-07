@@ -12,7 +12,9 @@ export function nextNodeId() { return `n${Date.now()}_${nextId++}`; }
 export const useStore = create((set, get) => ({
   // Project metadata
   projectName: 'Untitled Workflow',
+  workflowFilePath: null,
   setProjectName: (name) => set({ projectName: name }),
+  setWorkflowFilePath: (path) => set({ workflowFilePath: path }),
 
   // Graph state
   nodes: [],
@@ -33,11 +35,23 @@ export const useStore = create((set, get) => ({
     const data = defaultDataFor(kind);
     const newNode = {
       id,
-      type: 'obsidian',  // single custom type, data.cat drives the look
+      type: 'obsidian',
       position: position || { x: 200, y: 200 },
-      data
+      data,
     };
-    set({ nodes: [...get().nodes, newNode], selectedId: id });
+    const { selectedId, nodes, bridgeSessionOpen } = get();
+    let keepSelected = false;
+    if (selectedId) {
+      const cur = nodes.find(n => n.id === selectedId);
+      if (cur?.data?.kind === 'click_seq') {
+        const sid = cur.data.sessionId || cur.id;
+        if (bridgeSessionOpen[sid]) keepSelected = true;
+      }
+    }
+    set({
+      nodes: [...get().nodes, newNode],
+      selectedId: keepSelected ? selectedId : id,
+    });
     return id;
   },
 
@@ -57,13 +71,24 @@ export const useStore = create((set, get) => ({
 
   selectNode: (id) => set({ selectedId: id }),
 
+  // Inspector tab per node + bridge session UI sync
+  inspectorTabByNodeId: {},
+  setInspectorTab: (nodeId, tab) => set({
+    inspectorTabByNodeId: { ...get().inspectorTabByNodeId, [nodeId]: tab },
+  }),
+
+  bridgeSessionOpen: {},
+  setBridgeSessionOpen: (sessionId, open) => set({
+    bridgeSessionOpen: { ...get().bridgeSessionOpen, [sessionId]: open },
+  }),
+
   removeNode: (id) => set({
     nodes: get().nodes.filter(n => n.id !== id),
     edges: get().edges.filter(e => e.source !== id && e.target !== id),
     selectedId: get().selectedId === id ? null : get().selectedId,
   }),
 
-  clearAll: () => set({ nodes: [], edges: [], selectedId: null }),
+  clearAll: () => set({ nodes: [], edges: [], selectedId: null, workflowFilePath: null }),
 
   // ---------------- Execution ----------------
   running: false,
@@ -79,6 +104,15 @@ export const useStore = create((set, get) => ({
   setProgress: (p, current, total) => set({ progress: p, currentStep: current, totalSteps: total }),
   pushLog: (entry) => set({ log: [...get().log.slice(-200), { ...entry, t: Date.now() }] }),
 
+  // Toasts (top-right notifications)
+  toasts: [],
+  pushToast: (message, type = 'success') => {
+    const id = `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    set({ toasts: [...get().toasts.slice(-4), { id, message, type }] });
+    setTimeout(() => get().dismissToast(id), 3200);
+  },
+  dismissToast: (id) => set({ toasts: get().toasts.filter(t => t.id !== id) }),
+
   // Serialize / load
   toJSON: () => ({
     name: get().projectName,
@@ -86,10 +120,11 @@ export const useStore = create((set, get) => ({
     edges: get().edges,
     version: '0.1.0'
   }),
-  loadJSON: (data) => set({
+  loadJSON: (data, filePath = null) => set({
     projectName: data.name || 'Untitled',
     nodes: data.nodes || [],
     edges: data.edges || [],
     selectedId: null,
+    workflowFilePath: filePath,
   }),
 }));

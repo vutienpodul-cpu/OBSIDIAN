@@ -12,7 +12,7 @@
     "build": "electron-vite build",
     "build:win": "electron-vite build && electron-builder --win --x64",
     "build:mac": "electron-vite build && electron-builder --mac",
-    "postinstall": "playwright install chromium"
+    "postinstall": "playwright install chromium || true"
   },
   "dependencies": {
     "@reactflow/core": "^11.10.4",
