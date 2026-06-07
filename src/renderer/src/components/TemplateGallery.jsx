@@ -11,7 +11,7 @@ export default function TemplateGallery({ onClose }) {
 
   function load(tplFn) {
     const wf = tplFn();
-    loadJSON(wf);
+    loadJSON(wf, null);
     onClose();
   }
 

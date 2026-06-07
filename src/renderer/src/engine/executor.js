@@ -9,6 +9,13 @@
  * nodes see upstream outputs in `inputs` keyed by source node id.
  */
 import { useStore } from '../store.js';
+import {
+  resolveUrlForClickSeq,
+  findPromptText,
+  buildInjectMap,
+  prepareStepsForRun,
+  shortHost,
+} from './workflowUtils.js';
 
 let aborted = false;
 
@@ -66,7 +73,7 @@ export async function runWorkflow() {
     }
 
     try {
-      const output = await executeNode(node, inputs, store);
+      const output = await executeNode(node, inputs, store, nodes, edges);
       outputs[nodeId] = output;
       useStore.getState().updateNodeData(nodeId, { _output: output });
       store.setNodeStatus(nodeId, 'done');
@@ -115,12 +122,14 @@ function topoSort(nodes, edges) {
 /* ============================================
    NODE EXECUTORS — one per kind
    ============================================ */
-async function executeNode(node, inputs, store) {
+async function executeNode(node, inputs, store, nodes, edges) {
   const { kind, data } = { kind: node.data.kind, data: node.data };
   const upstream = Object.values(inputs);
 
   switch (kind) {
     // ---------- INPUT ----------
+    case 'url_source':
+      return { type: 'url', url: data.url, note: data.note };
     case 'brief':
       return { type: 'brief', text: data.text, tags: data.tags };
     case 'reference':
@@ -147,6 +156,8 @@ async function executeNode(node, inputs, store) {
     // ---------- AI BRIDGE ----------
     case 'bridge':
       return await runBridge(node, upstream, store);
+    case 'click_seq':
+      return await runClickSeq(node, upstream, store, nodes, edges);
 
     // ---------- GENERATION ----------
     case 'image_forge':
@@ -178,7 +189,7 @@ async function executeNode(node, inputs, store) {
       return { type: 'condition', pass: true, forwardedFrom: upstream };
     }
     case 'export':
-      return await runExport(data, upstream);
+      return await runExport(data, upstream, store);
     case 'delivery':
       return { type: 'delivered', target: data.target, items: upstream.flatMap(u => u?.items || []) };
 
@@ -322,25 +333,110 @@ async function runBridge(node, upstream, store) {
   return { type: 'bridge_output', source: data.url, items };
 }
 
-function findPromptText(upstream) {
-  for (const u of upstream) {
-    if (!u) continue;
-    if (u.prompts) {
-      // From compiler — take first target's first variant
-      const first = Object.values(u.prompts)[0];
-      if (Array.isArray(first)) return first[0];
-    }
-    if (u.text) return u.text;
-  }
-  return null;
-}
+async function runClickSeq(node, upstream, store, nodes, edges) {
+  const { data, id } = node;
+  const bridge = window.obsidian.bridge;
+  const steps = Array.isArray(data.steps) ? data.steps : [];
 
-function shortHost(url) {
-  try { return new URL(url).hostname.replace(/^www\./,''); } catch { return url; }
+  if (steps.length === 0) {
+    throw new Error('Chưa có steps — mở Inspector tab clicks và Pick Click');
+  }
+
+  const url = resolveUrlForClickSeq(node, nodes, edges, upstream);
+  const sessionId = data.sessionId || id;
+
+  store.pushLog({
+    nodeId: id,
+    level: 'info',
+    msg: `Opening click sequence → ${url ? shortHost(url) : 'no URL'}`,
+  });
+
+  await bridge.open(id, url || 'about:blank', sessionId);
+  useStore.getState().setBridgeSessionOpen(sessionId, true);
+
+  const stepsToRun = prepareStepsForRun(steps, url);
+  const injectMap = buildInjectMap(stepsToRun, findPromptText(upstream));
+
+  store.pushLog({ nodeId: id, level: 'info', msg: `Running ${stepsToRun.length} steps` });
+  const runRes = await bridge.runSteps(id, stepsToRun, injectMap, sessionId);
+  if (!runRes.ok) throw new Error(runRes.error || 'Click sequence failed');
+
+  if (data.waitFor) {
+    store.pushLog({ nodeId: id, level: 'info', msg: `Waiting for ${data.waitFor}` });
+    await bridge.waitStable(id, data.waitFor, (data.timeout || 180) * 1000, sessionId);
+  }
+
+  let items = [];
+  if (data.grabFrom) {
+    const grab = await bridge.grabOutput(id, data.grabFrom, data.grabAttr || 'src', sessionId);
+    if (grab.ok) items = grab.result.filter(Boolean);
+  }
+
+  store.pushLog({ nodeId: id, level: 'info', msg: `Grabbed ${items.length} outputs · browser left open` });
+  return { type: 'click_seq_output', source: url, items };
 }
 
 /* ---- EXPORT ---- */
-async function runExport(data, upstream) {
-  const items = upstream.flatMap(u => u?.items || u?.panels?.map(p => p.src) || []);
-  return { type: 'export', format: data.format, count: items.length, items };
+function collectExportItems(upstream) {
+  return upstream.flatMap(u => {
+    if (!u) return [];
+    if (Array.isArray(u.items) && u.items.length) return u.items;
+    if (Array.isArray(u.panels)) return u.panels.map(p => p.src).filter(Boolean);
+    return [];
+  }).filter(item => item != null && String(item).trim() !== '');
+}
+
+async function runExport(data, upstream, store) {
+  const items = collectExportItems(upstream);
+
+  let folderPath = (data.path || '').trim();
+  if (!folderPath) {
+    if (typeof window.obsidian?.pickFolder !== 'function') {
+      throw new Error('pickFolder chưa sẵn sàng — restart app (npm run dev)');
+    }
+    const picked = await window.obsidian.pickFolder();
+    if (!picked?.ok || !picked.path) {
+      throw new Error('Export hủy — chưa chọn thư mục output');
+    }
+    folderPath = picked.path;
+  }
+
+  store.pushLog({
+    level: 'info',
+    msg: `Exporting ${items.length} item(s) → ${folderPath}`,
+  });
+
+  if (typeof window.obsidian?.exportFiles !== 'function') {
+    throw new Error('exportFiles chưa sẵn sàng — restart app (npm run dev)');
+  }
+
+  const res = await window.obsidian.exportFiles({
+    folderPath,
+    items,
+    format: data.format,
+  });
+
+  if (!res.ok) throw new Error(res.error || 'Export thất bại');
+
+  if (res.errors?.length) {
+    store.pushLog({
+      level: 'warn',
+      msg: `${res.errors.length} file(s) lỗi khi export`,
+    });
+  }
+
+  store.pushLog({
+    level: 'info',
+    msg: `Đã lưu ${res.count} file vào ${folderPath}`,
+  });
+
+  return {
+    type: 'export',
+    format: data.format,
+    count: res.count,
+    folderPath,
+    saved: res.saved,
+    items,
+    errors: res.errors,
+  };
 }

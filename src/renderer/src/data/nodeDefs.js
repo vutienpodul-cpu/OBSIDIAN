@@ -77,9 +77,15 @@ export const NODE_DEFS = [
   // ---------- AI BRIDGE ----------
   { kind: 'click_seq', cat: 'bridge', icon: '👆', name: 'Click Sequence', desc: 'Ghi từng click thủ công trên website',
     schema: [
-      { key: 'steps',    label: 'Steps (JSON)',   type: 'json',   default: [] },
-      { key: 'sessionId',label: 'Session ID',     type: 'text',   default: '' },
-      { key: 'delay',    label: 'Delay ms/step',  type: 'number', default: 300 },
+      { key: 'url',      label: 'Fallback URL',         type: 'text',   default: '' },
+      { key: 'steps',    label: 'Steps (JSON)',         type: 'json',   default: [] },
+      { key: 'sessionId',label: 'Session ID',           type: 'text',   default: '' },
+      { key: 'delay',    label: 'Delay ms/step',        type: 'number', default: 300 },
+      { key: 'grabFrom', label: 'Grab output from',     type: 'text',   default: '' },
+      { key: 'grabAttr', label: 'Grab attribute',       type: 'select',
+        options: ['src','href','text'],                   default: 'src' },
+      { key: 'waitFor',  label: 'Wait stable selector', type: 'text',   default: '' },
+      { key: 'timeout',  label: 'Timeout (sec)',        type: 'number', default: 180 },
     ]},
   { kind: 'bridge',      cat: 'bridge',        icon: '▣', name: 'Browser Bridge', desc: 'Embed bất kỳ URL — record/replay',
     schema: [
@@ -141,7 +147,7 @@ export const NODE_DEFS = [
     schema: [
       { key: 'format',   label: 'Format',        type: 'select',
         options: ['PNG sequence','MP4 (H.265)','ProRes 4K','PSD','PPTX','GLB'], default: 'MP4 (H.265)' },
-      { key: 'path',     label: 'Output folder', type: 'text', default: '' },
+      { key: 'path',     label: 'Output folder', type: 'folder', default: '' },
     ]},
   { kind: 'delivery',    cat: 'orchestration', icon: '→', name: 'Delivery',       desc: 'Drive / Mail / Slack',
     schema: [

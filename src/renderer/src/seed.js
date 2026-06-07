@@ -190,6 +190,41 @@ export function tplBrandPackage() {
   };
 }
 
+// ─── Template: URL Source + Click Sequence demo ───────────────────────────
+export function tplUrlClickDemo() {
+  return {
+    name: 'URL + Click Sequence Demo',
+    desc: 'Pipeline mẫu: URL Source → Brief → Click Sequence → Export. Pick clicks trên Canva rồi chạy Ctrl+R.',
+    tags: ['Canva', 'Click Sequence', 'Beginner'],
+    nodes: [
+      N('u1', 'url_source', 80, 200, {
+        url: 'https://www.canva.com/design/new',
+        note: 'Trang tạo design mới trên Canva',
+      }),
+      N('b1', 'brief', 80, 420, {
+        text: 'Minimalist coffee flat lay, warm earth tones, ceramic mug, natural light, instagram square format',
+        tags: ['canva', 'demo'],
+      }),
+      N('c1', 'click_seq', 420, 280, {
+        url: 'https://www.canva.com/design/new',
+        steps: [],
+        sessionId: '',
+        delay: 300,
+        grabFrom: '',
+        grabAttr: 'src',
+        waitFor: '',
+        timeout: 180,
+      }),
+      N('e1', 'export', 760, 280, { format: 'PNG sequence', path: '' }),
+    ],
+    edges: [
+      E('u1', 'c1'),
+      E('b1', 'c1'),
+      E('c1', 'e1'),
+    ],
+  };
+}
+
 // ─── Template 5: Quick Canva Automation ──────────────────────────────────
 export function tplCanvaAuto() {
   return {
@@ -222,6 +257,7 @@ export function tplCanvaAuto() {
 
 // ─── Gallery export ───────────────────────────────────────────────────────
 export const TEMPLATES = [
+  { id: 'url_click_demo', fn: tplUrlClickDemo,    icon: '👆', color: '#DC2855' },
   { id: 'canva_auto',    fn: tplCanvaAuto,      icon: '◈', color: '#7C5CBF' },
   { id: 'mj_batch',     fn: tplMidjourneyBatch, icon: '◇', color: '#14B8A6' },
   { id: 'social_media', fn: tplSocialMedia,     icon: '▦', color: '#E8B4A0' },

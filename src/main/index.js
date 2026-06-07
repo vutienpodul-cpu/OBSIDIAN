@@ -3,7 +3,7 @@
  */
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, extname } from 'path';
 import fs from 'fs/promises';
 import https from 'https';
 import { BridgeController } from './bridge.js';
@@ -27,7 +27,7 @@ function createMainWindow() {
     titleBarStyle: 'hidden',
     titleBarOverlay: { color: '#0A0A0F', symbolColor: '#D4A574', height: 52 },
     webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
+      preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
@@ -46,15 +46,19 @@ function createMainWindow() {
 /* ============================================
    IPC — Workflow file I/O
    ============================================ */
-ipcMain.handle('workflow:save', async (_e, workflow) => {
-  const result = await dialog.showSaveDialog(mainWindow, {
-    title: 'Save OBSIDIAN workflow',
-    defaultPath: `${workflow.name || 'workflow'}.obsidian.json`,
-    filters: [{ name: 'OBSIDIAN Workflow', extensions: ['json'] }]
-  });
-  if (result.canceled || !result.filePath) return { ok: false };
-  await fs.writeFile(result.filePath, JSON.stringify(workflow, null, 2), 'utf-8');
-  return { ok: true, path: result.filePath };
+ipcMain.handle('workflow:save', async (_e, { workflow, filePath } = {}) => {
+  let target = filePath || null;
+  if (!target) {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save OBSIDIAN workflow',
+      defaultPath: `${workflow?.name || 'workflow'}.obsidian.json`,
+      filters: [{ name: 'OBSIDIAN Workflow', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false };
+    target = result.filePath;
+  }
+  await fs.writeFile(target, JSON.stringify(workflow, null, 2), 'utf-8');
+  return { ok: true, path: target };
 });
 
 ipcMain.handle('workflow:load', async () => {
@@ -78,6 +82,131 @@ ipcMain.handle('output:save', async (_e, { defaultName, buffer }) => {
 });
 
 ipcMain.handle('shell:open-path', async (_e, p) => shell.openPath(p));
+
+ipcMain.handle('dialog:pick-folder', async (_e, { defaultPath } = {}) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Chọn thư mục export',
+    defaultPath: defaultPath || app.getPath('documents'),
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (result.canceled || !result.filePaths[0]) return { ok: false };
+  return { ok: true, path: result.filePaths[0] };
+});
+
+function formatToExt(format) {
+  switch (format) {
+    case 'PNG sequence': return 'png';
+    case 'MP4 (H.265)': return 'mp4';
+    case 'ProRes 4K': return 'mov';
+    case 'PSD': return 'psd';
+    case 'PPTX': return 'pptx';
+    case 'GLB': return 'glb';
+    default: return 'png';
+  }
+}
+
+function mimeToExt(mime) {
+  if (!mime) return null;
+  const m = mime.split(';')[0].trim().toLowerCase();
+  const map = {
+    'image/png': 'png', 'image/jpeg': 'jpg', 'image/jpg': 'jpg',
+    'image/webp': 'webp', 'image/gif': 'gif', 'video/mp4': 'mp4',
+  };
+  return map[m] || null;
+}
+
+function extFromUrl(url) {
+  try {
+    const p = new URL(url).pathname;
+    const ext = extname(p).replace(/^\./, '').toLowerCase();
+    return ext || null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchRemoteItem(url) {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const ext = extFromUrl(url) || mimeToExt(res.headers.get('content-type')) || 'bin';
+  return { buffer, ext };
+}
+
+async function decodeDataUrl(dataUrl) {
+  const match = String(dataUrl).match(/^data:([^;,]+)?(?:;base64)?,(.+)$/);
+  if (!match) throw new Error('Invalid data URL');
+  const isBase64 = dataUrl.includes(';base64,');
+  const payload = match[2];
+  const buffer = isBase64 ? Buffer.from(payload, 'base64') : Buffer.from(decodeURIComponent(payload), 'utf-8');
+  const ext = mimeToExt(match[1]) || 'bin';
+  return { buffer, ext };
+}
+
+function isLocalPath(str) {
+  return str.startsWith('/') || /^[A-Za-z]:[\\/]/.test(str);
+}
+
+ipcMain.handle('export:write-files', async (_e, { folderPath, items, format }) => {
+  if (!folderPath) return { ok: false, error: 'Chưa chọn thư mục export' };
+
+  await fs.mkdir(folderPath, { recursive: true });
+  const defaultExt = formatToExt(format);
+  const saved = [];
+  const errors = [];
+  const list = Array.isArray(items) ? items : [];
+
+  if (list.length === 0) {
+    const manifest = join(folderPath, 'export_manifest.json');
+    await fs.writeFile(manifest, JSON.stringify({
+      format,
+      items: [],
+      exportedAt: new Date().toISOString(),
+      note: 'No upstream items — manifest only',
+    }, null, 2), 'utf-8');
+    return { ok: true, folderPath, saved: [manifest], errors: [], count: 1 };
+  }
+
+  for (let i = 0; i < list.length; i++) {
+    const str = String(list[i] ?? '').trim();
+    if (!str) continue;
+    const seq = String(i + 1).padStart(3, '0');
+
+    try {
+      let buffer;
+      let ext = defaultExt;
+
+      if (str.startsWith('data:')) {
+        ({ buffer, ext } = await decodeDataUrl(str));
+      } else if (str.startsWith('http://') || str.startsWith('https://')) {
+        ({ buffer, ext } = await fetchRemoteItem(str));
+      } else if (str.startsWith('file://')) {
+        const local = fileURLToPath(str);
+        buffer = await fs.readFile(local);
+        ext = extname(local).replace(/^\./, '') || defaultExt;
+      } else if (isLocalPath(str)) {
+        buffer = await fs.readFile(str);
+        ext = extname(str).replace(/^\./, '') || defaultExt;
+      } else {
+        buffer = Buffer.from(str, 'utf-8');
+        ext = 'txt';
+      }
+
+      const filePath = join(folderPath, `export_${seq}.${ext}`);
+      await fs.writeFile(filePath, buffer);
+      saved.push(filePath);
+    } catch (err) {
+      errors.push({ index: i, item: str.slice(0, 120), error: err.message || String(err) });
+    }
+  }
+
+  if (saved.length === 0 && errors.length > 0) {
+    return { ok: false, error: errors[0].error, folderPath, saved, errors, count: 0 };
+  }
+
+  return { ok: true, folderPath, saved, errors, count: saved.length };
+});
 
 /* ============================================
    IPC — ACCOUNTS
@@ -121,18 +250,23 @@ ipcMain.handle('accounts:session-exists', async (_e, accountId) => {
    ============================================ */
 ipcMain.handle('bridge:open', async (_e, { nodeId, url, sessionId }) => {
   const sid = sessionId || nodeId;
-  if (bridges.has(sid)) {
-    await bridges.get(sid).close();
-    bridges.delete(sid);
-  }
-  const b = new BridgeController(sid, {
-    onEvent: (event) => {
-      mainWindow?.webContents.send('bridge:event', { nodeId, sessionId: sid, ...event });
+  try {
+    if (bridges.has(sid)) {
+      await bridges.get(sid).close();
+      bridges.delete(sid);
     }
-  });
-  bridges.set(sid, b);
-  await b.open(url);
-  return { ok: true, sessionId: sid };
+    const b = new BridgeController(sid, {
+      onEvent: (event) => {
+        mainWindow?.webContents.send('bridge:event', { nodeId, sessionId: sid, ...event });
+      }
+    });
+    bridges.set(sid, b);
+    await b.open(url);
+    return { ok: true, sessionId: sid };
+  } catch (e) {
+    bridges.delete(sid);
+    return { ok: false, error: e.message || String(e) };
+  }
 });
 
 ipcMain.handle('bridge:record-start', async (_e, { nodeId, sessionId }) => {
@@ -210,6 +344,11 @@ ipcMain.handle('bridge:check-selector', async (_e, { nodeId, sessionId, selector
   } catch {
     return { ok: true, found: false };
   }
+});
+
+ipcMain.handle('bridge:is-open', async (_e, { nodeId, sessionId }) => {
+  const sid = sessionId || nodeId;
+  return { ok: true, open: bridges.has(sid) };
 });
 
 ipcMain.handle('bridge:close', async (_e, { nodeId, sessionId }) => {

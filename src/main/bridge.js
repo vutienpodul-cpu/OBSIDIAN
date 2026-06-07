@@ -1,6 +1,6 @@
 /**
  * OBSIDIAN — AI BRIDGE CONTROLLER
- * Wraps Playwright Chromium:
+ * Wraps Playwright (Google Chrome preferred, bundled Chromium fallback):
  *   - Click Sequence picker: user clicks elements one-by-one, each captured as a numbered step
  *   - Step replay: execute saved steps in order, with param injection
  *   - Legacy record/replay kept for backwards compat
@@ -12,15 +12,58 @@ import fs from 'fs/promises';
 
 const SESSION_ROOT = () => join(app.getPath('userData'), 'sessions');
 
+const LAUNCH_OPTS = {
+  headless: false,
+  viewport: { width: 1280, height: 800 },
+  args: ['--disable-blink-features=AutomationControlled', '--no-default-browser-check', '--no-first-run'],
+};
+
+/** Bundled Chromium path — arm64 fallback when Playwright resolves missing x64 on Apple Silicon. */
+async function resolveBundledChromiumExecutable() {
+  const preferred = chromium.executablePath();
+  try {
+    await fs.access(preferred);
+    return preferred;
+  } catch {}
+
+  const alt = preferred.replace('chrome-mac-x64', 'chrome-mac-arm64');
+  if (alt !== preferred) {
+    try {
+      await fs.access(alt);
+      return alt;
+    } catch {}
+  }
+  return preferred;
+}
+
+/** Prefer installed Google Chrome; fall back to Playwright's bundled Chromium. */
+async function launchBrowserContext(sessionDir, onLog) {
+  try {
+    onLog('Launching Google Chrome (system)...');
+    return await chromium.launchPersistentContext(sessionDir, {
+      ...LAUNCH_OPTS,
+      channel: 'chrome',
+    });
+  } catch (err) {
+    onLog(`Chrome not available (${err.message}) — falling back to bundled Chromium`);
+    const executablePath = await resolveBundledChromiumExecutable();
+    onLog(`Chromium: ${executablePath}`);
+    return chromium.launchPersistentContext(sessionDir, {
+      ...LAUNCH_OPTS,
+      executablePath,
+    });
+  }
+}
+
 // ─── Click Picker — inject vào trang để user chọn element ───────────────────
 // Khi user di chuột qua element, nó sẽ được highlight đỏ.
-// Khi user click, selector + info của element được lưu vào window.__obsidianPicked
+// Khi user click trái/phải, selector + info được lưu vào window.__obsidianPicked
 const CLICK_PICKER_SCRIPT = `
 (() => {
   if (window.__obsidianPickerActive) return;
   window.__obsidianPickerActive = true;
+  let done = false;
 
-  // Overlay highlight
   const hl = document.createElement('div');
   hl.id = '__obs_hl';
   hl.style.cssText = [
@@ -31,7 +74,6 @@ const CLICK_PICKER_SCRIPT = `
   ].join(';');
   document.body.appendChild(hl);
 
-  // Badge showing step number
   const badge = document.createElement('div');
   badge.id = '__obs_badge';
   badge.style.cssText = [
@@ -48,13 +90,11 @@ const CLICK_PICKER_SCRIPT = `
     let cur = el;
     while (cur && cur !== document.body && cur.nodeType === Node.ELEMENT_NODE) {
       let sel = cur.nodeName.toLowerCase();
-      // Prefer stable attributes
       if (cur.id) { sel += '#' + CSS.escape(cur.id); path.unshift(sel); break; }
       if (cur.getAttribute('data-testid')) { sel += '[data-testid="' + cur.getAttribute('data-testid') + '"]'; path.unshift(sel); break; }
       if (cur.getAttribute('name')) { sel += '[name="' + cur.getAttribute('name') + '"]'; path.unshift(sel); break; }
       if (cur.getAttribute('placeholder')) { sel += '[placeholder="' + cur.getAttribute('placeholder').replace(/"/g,'') + '"]'; path.unshift(sel); break; }
       if (cur.getAttribute('aria-label')) { sel += '[aria-label="' + cur.getAttribute('aria-label').replace(/"/g,'') + '"]'; path.unshift(sel); break; }
-      // nth-of-type fallback
       let sib = cur, idx = 1;
       while ((sib = sib.previousElementSibling)) if (sib.nodeName === cur.nodeName) idx++;
       if (idx > 1) sel += ':nth-of-type(' + idx + ')';
@@ -79,17 +119,21 @@ const CLICK_PICKER_SCRIPT = `
     badge.style.top  = Math.max(0, r.top - 24) + 'px';
   }
 
-  document.addEventListener('mouseover', e => {
-    if (e.target.id === '__obs_hl' || e.target.id === '__obs_badge') return;
-    moveHL(e.target);
-  }, true);
+  function cleanup() {
+    hl.remove(); badge.remove();
+    document.removeEventListener('mouseover', onOver, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('contextmenu', onContext, true);
+    window.__obsidianPickerActive = false;
+  }
 
-  document.addEventListener('click', e => {
-    const el = e.target;
-    if (el.id === '__obs_hl' || el.id === '__obs_badge') return;
+  function finishPick(el, e, action) {
+    if (done) return;
+    done = true;
     e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
 
-    const info = {
+    window.__obsidianPicked = {
+      action,
       selector: cssPath(el),
       tag: el.tagName.toLowerCase(),
       text: (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 80),
@@ -99,12 +143,27 @@ const CLICK_PICKER_SCRIPT = `
       x: Math.round(e.clientX), y: Math.round(e.clientY),
       pageUrl: location.href,
     };
+    cleanup();
+  }
 
-    window.__obsidianPicked = info;
-    // Cleanup
-    hl.remove(); badge.remove();
-    window.__obsidianPickerActive = false;
-  }, { capture: true, once: true });
+  function onOver(e) {
+    if (e.target.id === '__obs_hl' || e.target.id === '__obs_badge') return;
+    moveHL(e.target);
+  }
+  function onClick(e) {
+    const el = e.target;
+    if (el.id === '__obs_hl' || el.id === '__obs_badge') return;
+    finishPick(el, e, 'click');
+  }
+  function onContext(e) {
+    const el = e.target;
+    if (el.id === '__obs_hl' || el.id === '__obs_badge') return;
+    finishPick(el, e, 'right_click');
+  }
+
+  document.addEventListener('mouseover', onOver, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('contextmenu', onContext, true);
 })();
 `;
 
@@ -155,13 +214,10 @@ export class BridgeController {
   async open(url) {
     await fs.mkdir(SESSION_ROOT(), { recursive: true });
     const sessionDir = join(SESSION_ROOT(), this.nodeId);
-    this.emit({ kind: 'log', level: 'info', msg: `Launching Chromium · session ${this.nodeId}` });
+    this.emit({ kind: 'log', level: 'info', msg: `Opening browser · session ${this.nodeId}` });
 
-    this.context = await chromium.launchPersistentContext(sessionDir, {
-      headless: false,
-      viewport: { width: 1280, height: 800 },
-      args: ['--disable-blink-features=AutomationControlled', '--no-default-browser-check', '--no-first-run']
-    });
+    const log = (msg) => this.emit({ kind: 'log', level: 'info', msg });
+    this.context = await launchBrowserContext(sessionDir, log);
     await this.context.addInitScript({ content: RECORDER_SCRIPT });
     this.page = this.context.pages()[0] || await this.context.newPage();
     if (url) {
@@ -180,18 +236,21 @@ export class BridgeController {
   async captureClick(stepNumber = 1) {
     if (!this.page) throw new Error('Browser chưa mở — nhấn OPEN BROWSER trước');
 
-    // Update badge text
+    await this.page.evaluate(() => {
+      window.__obsidianPickerActive = false;
+      delete window.__obsidianPicked;
+    }).catch(() => {});
+
     const script = CLICK_PICKER_SCRIPT.replace(
       "badge.style.display = 'block';",
-      `badge.style.display = 'block'; badge.textContent = 'Click ${stepNumber}';`
+      `badge.style.display = 'block'; badge.textContent = 'Step ${stepNumber} · R=right';`
     );
 
-    this.emit({ kind: 'log', level: 'info', msg: `Đang chờ bạn click step ${stepNumber} trên browser...` });
+    this.emit({ kind: 'log', level: 'info', msg: `Đang chờ click step ${stepNumber} (trái hoặc phải)...` });
     this.emit({ kind: 'picking', step: stepNumber });
 
     await this.page.evaluate(script);
 
-    // Poll cho đến khi có __obsidianPicked (timeout 120s)
     const start = Date.now();
     while (Date.now() - start < 120000) {
       const picked = await this.page.evaluate(() => {
@@ -205,12 +264,17 @@ export class BridgeController {
       }
       await this.page.waitForTimeout(200);
     }
+
+    await this.page.evaluate(() => {
+      window.__obsidianPickerActive = false;
+      delete window.__obsidianPicked;
+    }).catch(() => {});
     throw new Error(`Timeout — không nhận được click trong 120 giây`);
   }
 
   /**
    * Run a Click Sequence — danh sách steps đã định nghĩa trước.
-   * Step types: click | type | wait | goto | press
+   * Step types: click | right_click | type | wait | goto | press
    * injectMap: { stepIndex: 'value to inject' } — inject upstream data vào type steps
    */
   async runSteps(steps, injectMap = {}) {
@@ -227,11 +291,19 @@ export class BridgeController {
 
         } else if (s.type === 'click') {
           await this.page.waitForSelector(s.selector, { timeout: 10000 }).catch(() => null);
-          // Fallback: try by coordinates if selector fails
           try {
             await this.page.click(s.selector, { timeout: 5000 });
           } catch {
             if (s.x && s.y) await this.page.mouse.click(s.x, s.y);
+            else throw new Error(`Không tìm thấy element: ${s.selector}`);
+          }
+
+        } else if (s.type === 'right_click') {
+          await this.page.waitForSelector(s.selector, { timeout: 10000 }).catch(() => null);
+          try {
+            await this.page.click(s.selector, { button: 'right', timeout: 5000 });
+          } catch {
+            if (s.x && s.y) await this.page.mouse.click(s.x, s.y, { button: 'right' });
             else throw new Error(`Không tìm thấy element: ${s.selector}`);
           }
 
