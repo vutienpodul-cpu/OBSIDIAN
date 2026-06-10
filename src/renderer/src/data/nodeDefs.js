@@ -102,6 +102,36 @@ export const NODE_DEFS = [
       { key: 'timeout',    label: 'Timeout (sec)',    type: 'number', default: 180 },
     ]},
 
+  // ---------- PROMPT FACTORY NODES (import / manual gen pipeline) ----------
+  { kind: 'imageGen', cat: 'generation', icon: '◇', name: 'Image Gen', desc: 'Tạo ảnh AI từ prompt + ref (PF)',
+    schema: [
+      { key: 'model',          label: 'Model',            type: 'text',   default: '🍌 Nano Banana Pro' },
+      { key: 'aspectRatio',    label: 'Aspect',           type: 'select', options: ['16:9','9:16','1:1','2:3','3:2'], default: '16:9' },
+      { key: 'batchCount',     label: 'Batch',            type: 'number', default: 1 },
+      { key: 'bridge_url',     label: 'Auto URL (opt)',   type: 'text',   default: '' },
+      { key: 'bridge_inject',  label: 'Inject selector',  type: 'text',   default: '' },
+      { key: 'bridge_grab',    label: 'Grab selector',    type: 'text',   default: '' },
+    ]},
+  { kind: 'videoGen', cat: 'generation', icon: '▷', name: 'Video Gen', desc: 'Tạo video AI từ storyboard + motion (PF)',
+    schema: [
+      { key: 'model',          label: 'Model',            type: 'text',   default: 'Omni Flash' },
+      { key: 'aspectRatio',    label: 'Aspect',           type: 'select', options: ['16:9','9:16','1:1'], default: '16:9' },
+      { key: 'duration',       label: 'Duration (s)',     type: 'select', options: [4,6,8,10], default: 6 },
+      { key: 'batchCount',     label: 'Batch',            type: 'number', default: 1 },
+      { key: 'bridge_url',     label: 'Auto URL (opt)',   type: 'text',   default: '' },
+      { key: 'bridge_inject',  label: 'Inject selector',  type: 'text',   default: '' },
+      { key: 'bridge_grab',    label: 'Grab selector',    type: 'text',   default: '' },
+    ]},
+  { kind: 'imageUpload', cat: 'input', icon: '⬆', name: 'Image Upload', desc: 'Ảnh nguồn / kết quả đã gen',
+    schema: [
+      { key: 'uploadLabel', label: 'Label', type: 'text',  default: 'Ảnh nguồn' },
+      { key: 'files',       label: 'Files', type: 'files', default: [] },
+    ]},
+  { kind: 'stitcher', cat: 'orchestration', icon: '⊞', name: 'Stitcher', desc: 'Ghép tất cả video clip thành film',
+    schema: [
+      { key: 'progress', label: 'Progress', type: 'range', min: 0, max: 100, step: 1, default: 0 },
+    ]},
+
   // ---------- GENERATION (preset Bridge) ----------
   { kind: 'image_forge', cat: 'generation',    icon: '◇', name: 'Image Forge',    desc: 'Midjourney / Higgsfield',
     schema: [

@@ -120,11 +120,49 @@ export const useStore = create((set, get) => ({
     edges: get().edges,
     version: '0.1.0'
   }),
-  loadJSON: (data, filePath = null) => set({
-    projectName: data.name || 'Untitled',
-    nodes: data.nodes || [],
-    edges: data.edges || [],
-    selectedId: null,
-    workflowFilePath: filePath,
-  }),
+  loadJSON: (data, filePath = null) => {
+    const flow = isPromptFactoryFormat(data) ? normalizePromptFactoryFlow(data) : data;
+    set({
+      projectName: flow.name || 'Untitled',
+      nodes: flow.nodes || [],
+      edges: flow.edges || [],
+      selectedId: null,
+      workflowFilePath: filePath,
+    });
+  },
 }));
+
+/* ============================================================
+   PROMPT FACTORY import adapter
+   Converts flow_project_*.json (type-keyed nodes) → OBSIDIAN format
+   ============================================================ */
+function isPromptFactoryFormat(data) {
+  return Array.isArray(data?.nodes) &&
+    data.nodes.some(n => ['prompt','imageGen','videoGen','imageUpload','stitcher'].includes(n.type));
+}
+
+function normalizePromptFactoryFlow(raw) {
+  const CAT  = { prompt:'direction', imageGen:'generation', videoGen:'generation', imageUpload:'input', stitcher:'orchestration' };
+  const ICON = { prompt:'P', imageGen:'◇', videoGen:'▷', imageUpload:'⬆', stitcher:'⊞' };
+
+  const nodes = raw.nodes.map(n => {
+    const kind = n.type;
+    const p    = n.data?.params || {};
+    const base = {
+      kind,
+      label:    n.data?.label || kind,
+      icon:     ICON[kind]    || '?',
+      cat:      CAT[kind]     || 'input',
+      _status:  null,
+    };
+    if (kind === 'prompt')      Object.assign(base, { text: p.text || '', lang: 'EN' });
+    if (kind === 'imageGen')    Object.assign(base, { model: p.model || '🍌 Nano Banana Pro', aspectRatio: p.aspectRatio || '16:9', batchCount: p.batchCount || 1 });
+    if (kind === 'videoGen')    Object.assign(base, { model: p.model || 'Omni Flash',         aspectRatio: p.aspectRatio || '16:9', duration: p.duration || 6, batchCount: p.batchCount || 1 });
+    if (kind === 'imageUpload') Object.assign(base, { files: [], uploadLabel: n.data?.label || 'Ảnh nguồn' });
+    if (kind === 'stitcher')    Object.assign(base, { progress: p.progress || 0 });
+    return { id: n.id, type: 'obsidian', position: n.position, data: base };
+  });
+
+  const ts = raw.timestamp ? raw.timestamp.slice(0, 10) : '';
+  return { name: `PF Import${ts ? ' ' + ts : ''}`, nodes, edges: raw.edges || [], version: '0.1.0' };
+}

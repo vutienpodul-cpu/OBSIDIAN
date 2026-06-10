@@ -3,7 +3,7 @@ import { useStore } from '../store.js';
 import { useAccountStore } from '../store/accountStore.js';
 import { runWorkflow } from '../engine/executor.js';
 
-export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }) {
+export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail, onOpenStudio }) {
   const projectName = useStore(s => s.projectName);
   const workflowFilePath = useStore(s => s.workflowFilePath);
   const setProjectName = useStore(s => s.setProjectName);
@@ -110,6 +110,11 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail }
       <div className="divider-v" />
 
       {/* Workflow actions */}
+      <button className="btn" onClick={onOpenStudio} title="Prompt Factory Studio — Brief → Mega Prompt → Flow"
+        style={{ fontSize: 10, letterSpacing: '0.06em', padding: '5px 10px', color: 'var(--rose-gold)', borderColor: 'var(--border-accent)' }}>
+        PF STUDIO
+      </button>
+
       <button className="btn btn-icon" onClick={onNewWorkflow} title="Workflow mới / Templates">＋</button>
       <button className="btn btn-icon" onClick={onLoad} title="Mở workflow (.json)">📂</button>
       <button className="btn btn-icon" onClick={onSave}
