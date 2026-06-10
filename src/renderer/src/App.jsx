@@ -8,6 +8,7 @@ import ExecLog from './components/ExecLog.jsx';
 import TemplateGallery from './components/TemplateGallery.jsx';
 import AccountManager from './components/AccountManager.jsx';
 import TempMailPanel from './components/TempMailPanel.jsx';
+import StudioPanel from './components/StudioPanel.jsx';
 import ToastStack from './components/ToastStack.jsx';
 import { useStore } from './store.js';
 import { useAccountStore } from './store/accountStore.js';
@@ -17,6 +18,7 @@ export default function App() {
   const [showGallery, setShowGallery] = useState(false);
   const [showAccounts, setShowAccounts] = useState(false);
   const [showTempMail, setShowTempMail] = useState(false);
+  const [showStudio, setShowStudio] = useState(false);
   const loadAccounts = useAccountStore(s => s.load);
 
   useEffect(() => {
@@ -32,6 +34,7 @@ export default function App() {
         onNewWorkflow={() => setShowGallery(true)}
         onOpenAccounts={() => setShowAccounts(true)}
         onOpenTempMail={() => setShowTempMail(true)}
+        onOpenStudio={() => setShowStudio(true)}
       />
       <Library />
       <ReactFlowProvider>
@@ -43,6 +46,7 @@ export default function App() {
       {showGallery   && <TemplateGallery  onClose={() => setShowGallery(false)} />}
       {showAccounts  && <AccountManager   onClose={() => setShowAccounts(false)} />}
       {showTempMail  && <TempMailPanel    onClose={() => setShowTempMail(false)} />}
+      {showStudio    && <StudioPanel      onClose={() => setShowStudio(false)} />}
       <ToastStack />
     </div>
   );

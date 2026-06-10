@@ -162,13 +162,71 @@ async function executeNode(node, inputs, store, nodes, edges) {
     // ---------- GENERATION ----------
     case 'image_forge':
     case 'video_forge':
-      // These are conceptual wrappers — in practice they would route to
-      // a Bridge node configured for the chosen engine. For now we pass through.
       return { type: kind, engine: data.engine, variants: data.count || 1, items: upstream.flatMap(u => u?.items || []) };
     case 'storyboard':
       return buildStoryboard(upstream, data.aspect);
     case 'vfx':
       return { type: 'vfx', layers: upstream.length, particles: data.particles };
+
+    // ---------- PROMPT FACTORY GENERATION NODES ----------
+    case 'imageGen': {
+      const promptText = findPromptText(upstream);
+      const refImages  = upstream.flatMap(u => u?.items || []).filter(Boolean);
+      // Auto mode: if bridge URL + recorded actions are configured, replay them
+      if (data.bridge_url && data.actions?.length) {
+        const bridgeNode = {
+          ...node,
+          data: {
+            ...data,
+            url:        data.bridge_url,
+            injectInto: data.bridge_inject  || '',
+            grabFrom:   data.bridge_grab    || '',
+            grabAttr:   data.bridge_grab_attr || 'src',
+            waitFor:    data.bridge_wait    || '',
+            timeout:    data.bridge_timeout || 180,
+          },
+        };
+        return await runBridge(bridgeNode, upstream, store);
+      }
+      store.pushLog({ nodeId: node.id, level: 'warn', msg: `[imageGen] Prompt ready (${data.model}) — paste into AI tool, then upload result` });
+      return { type: 'imageGen', model: data.model, aspectRatio: data.aspectRatio, promptText, refImages, items: data._output?.items || [] };
+    }
+
+    case 'videoGen': {
+      const motionPrompt = findPromptText(upstream);
+      const inputImages  = upstream.flatMap(u => u?.items || []).filter(Boolean);
+      if (data.bridge_url && data.actions?.length) {
+        const bridgeNode = {
+          ...node,
+          data: {
+            ...data,
+            url:        data.bridge_url,
+            injectInto: data.bridge_inject   || '',
+            grabFrom:   data.bridge_grab     || '',
+            grabAttr:   data.bridge_grab_attr || 'src',
+            waitFor:    data.bridge_wait     || '',
+            timeout:    data.bridge_timeout  || 180,
+          },
+        };
+        return await runBridge(bridgeNode, upstream, store);
+      }
+      store.pushLog({ nodeId: node.id, level: 'warn', msg: `[videoGen] Ready (${data.model} · ${data.duration}s · ${inputImages.length} imgs) — generate manually` });
+      return { type: 'videoGen', model: data.model, duration: data.duration, aspectRatio: data.aspectRatio, motionPrompt, inputImages, items: data._output?.items || [] };
+    }
+
+    case 'imageUpload': {
+      const files = data.files || data._output?.items || [];
+      if (!files.length) {
+        store.pushLog({ nodeId: node.id, level: 'warn', msg: '[imageUpload] No files loaded — add images in Inspector' });
+      }
+      return { type: 'imageUpload', items: files };
+    }
+
+    case 'stitcher': {
+      const clips = upstream.flatMap(u => u?.items || []).filter(Boolean);
+      store.pushLog({ nodeId: node.id, level: 'info', msg: `[stitcher] ${clips.length} clip(s) collected` });
+      return { type: 'stitcher', items: clips, count: clips.length };
+    }
 
     // ---------- ORCHESTRATION ----------
     case 'approval': {
