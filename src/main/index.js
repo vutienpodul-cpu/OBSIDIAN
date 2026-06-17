@@ -289,8 +289,13 @@ ipcMain.handle('bridge:replay', async (_e, { nodeId, sessionId, actions, params 
   const sid = sessionId || nodeId;
   const b = bridges.get(sid);
   if (!b) return { ok: false, error: 'Bridge not open' };
-  await b.replay(actions, params);
-  return { ok: true };
+  try {
+    await b.replay(actions, params);
+    return { ok: true };
+  } catch (e) {
+    if (e.message === 'Aborted by user') return { ok: false, error: e.message, aborted: true };
+    return { ok: false, error: e.message };
+  }
 });
 
 ipcMain.handle('bridge:grab-output', async (_e, { nodeId, sessionId, selector, attr }) => {
@@ -329,6 +334,31 @@ ipcMain.handle('bridge:run-steps', async (_e, { nodeId, sessionId, steps, inject
   try {
     await b.runSteps(steps || [], injectMap || {});
     return { ok: true };
+  } catch (e) {
+    if (e.message === 'Aborted by user') return { ok: false, error: e.message, aborted: true };
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('bridge:abort-all', async () => {
+  for (const b of bridges.values()) b.abort();
+  return { ok: true };
+});
+
+ipcMain.handle('bridge:abort', async (_e, { nodeId, sessionId }) => {
+  const sid = sessionId || nodeId;
+  const b = bridges.get(sid);
+  if (b) b.abort();
+  return { ok: true };
+});
+
+ipcMain.handle('bridge:check-steps', async (_e, { nodeId, sessionId, steps }) => {
+  const sid = sessionId || nodeId;
+  const b = bridges.get(sid);
+  if (!b) return { ok: false, error: 'Bridge not open' };
+  try {
+    const results = await b.checkSteps(steps || []);
+    return { ok: true, results };
   } catch (e) {
     return { ok: false, error: e.message };
   }

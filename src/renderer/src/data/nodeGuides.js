@@ -12,6 +12,7 @@ export const NODE_GUIDES = {
     inputs: [],
     outputs: [
       { node: 'Click Sequence', desc: 'URL Source → Click Sequence: truyền URL để mở trước khi bắt đầu click sequence' },
+      { node: 'Image Gen / Video Gen', desc: 'URL Source → Gen node: mở tool AI trước khi chạy web task' },
       { node: 'Browser Bridge', desc: 'URL Source → Bridge: truyền URL vào embedded URL' },
     ],
     steps: [
@@ -63,6 +64,64 @@ export const NODE_GUIDES = {
       'Dùng "📋 Copy JSON" để backup sequence, dán lại nếu cần restore.',
     ],
     warning: 'Một số website phát hiện automation và block (Cloudflare, reCAPTCHA). Nếu bị block, thử tắt headless mode hoặc thêm wait dài hơn giữa các bước.',
+  },
+
+  // ─────────────────────────────────────────────────────────────────────
+  imageGen: {
+    summary: 'Web task tạo ảnh AI — ghi chuỗi click trên tool web (Flow AI, v.v.), inject prompt từ node Prompt upstream.',
+    when: 'Sau khi import PF flow hoặc khi cần tự động tạo ảnh trên website thay vì gọi API.',
+    inputs: [
+      { node: 'Prompt', desc: 'Storyboard / ref prompt — inject vào step type khi chạy' },
+      { node: 'URL Source', desc: 'URL tool tạo ảnh (optional nếu đã điền Tool URL trong props)' },
+      { node: 'Image Upload / ref imageGen', desc: 'Ảnh ref qua upstream items (phase sau: upload step)' },
+    ],
+    outputs: [
+      { node: 'Video Gen', desc: 'Ảnh storyboard → input cho video gen' },
+      { node: 'Export', desc: 'Lưu file ảnh đã grab' },
+    ],
+    steps: [
+      { title: 'Điền Tool URL', body: 'Tab props → Tool URL (hoặc nối URL Source). Ví dụ URL trang tạo ảnh trên Flow AI.' },
+      { title: 'Tab clicks → Load preset (optional)', body: 'Chọn preset skeleton rồi Pick Click lại từng selector trên browser.' },
+      { title: 'Pick Click các bước', body: 'OPEN BROWSER → Pick Click: paste prompt, chọn model, bấm Generate, chờ kết quả.' },
+      { title: 'Cấu hình Grab', body: 'Tab props: Grab output from = selector ảnh kết quả. Wait stable nếu cần chờ render.' },
+      { title: 'Chạy workflow', body: 'Ctrl+R — node inject prompt từ upstream và replay steps.' },
+    ],
+    usecases: [
+      { title: 'PF ref sheet', body: 'Prompt (character sheet) → Image Gen → Export' },
+      { title: 'PF storyboard', body: 'Prompt (grid) → Image Gen → Video Gen' },
+    ],
+    tips: [
+      'Step type với value trống = inject prompt text từ node Prompt nối vào.',
+      'Badge NEEDS SETUP = chưa có steps — mở tab clicks và Pick Click.',
+      'Model / Aspect chỉ là metadata hiển thị — không gọi API.',
+    ],
+    warning: 'Phải có ít nhất 1 step trước khi chạy workflow — không còn chế độ manual paste.',
+  },
+
+  videoGen: {
+    summary: 'Web task tạo video AI — ghi click sequence trên tool web, inject motion prompt từ upstream.',
+    when: 'Mỗi shot PF cần gen video trên Flow AI hoặc tool tương tự qua UI.',
+    inputs: [
+      { node: 'Prompt', desc: 'Video motion prompt — inject vào step type' },
+      { node: 'Image Gen', desc: 'Storyboard image qua edge ảnh → video (graph PF)' },
+      { node: 'URL Source', desc: 'URL trang tạo video' },
+    ],
+    outputs: [
+      { node: 'Stitcher / Export', desc: 'Clip video output' },
+    ],
+    steps: [
+      { title: 'Tool URL + tab clicks', body: 'Giống Image Gen — ghi flow: upload ảnh, paste motion prompt, Generate, chờ render.' },
+      { title: 'Grab video', body: 'Grab output from = selector video/src hoặc download button.' },
+      { title: 'RUN TEST', body: 'Test trước khi chạy full workflow nhiều shot.' },
+    ],
+    usecases: [
+      { title: 'PF shot pipeline', body: 'storyboard Image Gen → Video Gen → Stitcher' },
+    ],
+    tips: [
+      'Duration trong props là metadata (4/6/8/10s) — chọn đúng trên UI tool khi Pick Click.',
+      'Preset "Flow AI — Video Gen" là khung bước, cần Pick Click lại selector thật.',
+    ],
+    warning: null,
   },
 
   // ─────────────────────────────────────────────────────────────────────

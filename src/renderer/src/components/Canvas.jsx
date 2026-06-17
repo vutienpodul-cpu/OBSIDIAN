@@ -1,11 +1,21 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import ReactFlow, {
   Background, Controls, MiniMap, useReactFlow,
 } from 'reactflow';
 import { useStore } from '../store.js';
 import ObsidianNode from './nodes/ObsidianNode.jsx';
+import {
+  WEB_TASK_KINDS,
+  isValidWebTaskConnection,
+} from '../engine/workflowUtils.js';
 
 const nodeTypes = { obsidian: ObsidianNode };
+
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
 
 export default function Canvas() {
   const nodes = useStore(s => s.nodes);
@@ -14,7 +24,8 @@ export default function Canvas() {
   const onEdgesChange = useStore(s => s.onEdgesChange);
   const onConnect = useStore(s => s.onConnect);
   const addNode = useStore(s => s.addNode);
-  const selectNode = useStore(s => s.selectNode);
+  const selectNodes = useStore(s => s.selectNodes);
+  const removeNodes = useStore(s => s.removeNodes);
 
   const wrapperRef = useRef(null);
   const { screenToFlowPosition } = useReactFlow();
@@ -32,19 +43,74 @@ export default function Canvas() {
     addNode(kind, pos);
   }, [addNode, screenToFlowPosition]);
 
-  const onSelectionChange = useCallback(({ nodes }) => {
-    if (nodes && nodes.length) selectNode(nodes[0].id);
-    else selectNode(null);
-  }, [selectNode]);
+  const onSelectionChange = useCallback(({ nodes: selNodes }) => {
+    selectNodes((selNodes || []).map(n => n.id));
+  }, [selectNodes]);
+
+  const isValidConnection = useCallback(({ source, target, targetHandle }) => {
+    const { nodes, edges } = useStore.getState();
+    const src = nodes.find(n => n.id === source);
+    const tgt = nodes.find(n => n.id === target);
+    if (!src || !tgt) return false;
+
+    if (WEB_TASK_KINDS.includes(tgt.data.kind)) {
+      if (!targetHandle) return false;
+      if (!isValidWebTaskConnection(src.data.kind, targetHandle)) return false;
+      if (targetHandle.startsWith('prompt-') &&
+        edges.some(e => e.target === target && e.targetHandle === targetHandle)) return false;
+      return true;
+    }
+
+    if (targetHandle && targetHandle !== 'in') return false;
+    return true;
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (isTypingTarget(document.activeElement)) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      const { nodes: allNodes, selectedIds } = useStore.getState();
+
+      if (mod && e.key.toLowerCase() === 'a') {
+        if (allNodes.length === 0) return;
+        e.preventDefault();
+        selectNodes(allNodes.map(n => n.id));
+        return;
+      }
+
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
+        e.preventDefault();
+        removeNodes(selectedIds);
+      }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectNodes, removeNodes]);
 
   return (
-    <main className="canvas-wrapper" ref={wrapperRef}>
+    <main className="canvas-wrapper" ref={wrapperRef} tabIndex={-1}>
+      <div className="canvas-hints">
+        <span>Kéo trống = di chuyển canvas</span>
+        <span>·</span>
+        <span><kbd>Shift</kbd>+kéo = chọn vùng</span>
+        <span>·</span>
+        <span>Chuột phải kéo = pan</span>
+        <span>·</span>
+        <span><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+click thêm/bớt</span>
+        <span>·</span>
+        <span><kbd>Ctrl</kbd>+<kbd>A</kbd> chọn tất</span>
+        <span>·</span>
+        <span><kbd>Del</kbd> xóa</span>
+      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        isValidConnection={isValidConnection}
         onDrop={onDrop}
         onDragOver={onDragOver}
         onSelectionChange={onSelectionChange}
@@ -55,6 +121,12 @@ export default function Canvas() {
         maxZoom={2}
         defaultEdgeOptions={{ type: 'default' }}
         proOptions={{ hideAttribution: true }}
+        panOnDrag={[0, 1, 2]}
+        selectionOnDrag={false}
+        selectionKeyCode="Shift"
+        multiSelectionKeyCode={['Meta', 'Control']}
+        deleteKeyCode={null}
+        selectNodesOnDrag={false}
       >
         <Background gap={24} size={1} color="rgba(255,255,255,0.04)" />
         <Controls position="bottom-left" showInteractive={false} />

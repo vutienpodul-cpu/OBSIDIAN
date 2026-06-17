@@ -29,8 +29,16 @@ export default function ExecLog() {
   return (
     <footer className="exec">
       <div className="exec-controls">
-        <div className="exec-btn run" onClick={() => !running && runWorkflow()} title="Run">▶</div>
-        <div className="exec-btn" onClick={() => stopWorkflow()} title="Stop">■</div>
+        <div
+          className={`exec-btn run ${!running ? '' : 'disabled'}`}
+          onClick={() => !running && runWorkflow()}
+          title="Run"
+        >▶</div>
+        <div
+          className={`exec-btn stop ${running ? 'active' : 'disabled'}`}
+          onClick={() => running && stopWorkflow()}
+          title={running ? 'Stop (Esc)' : 'Stop — chỉ dùng khi đang chạy'}
+        >■</div>
       </div>
       <div className="exec-progress">
         <div className="exec-progress-bar" style={{ width: `${Math.max(0, Math.min(100, progress*100))}%` }} />

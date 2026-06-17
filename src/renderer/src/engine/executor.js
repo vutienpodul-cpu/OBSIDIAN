@@ -12,14 +12,20 @@ import { useStore } from '../store.js';
 import {
   resolveUrlForClickSeq,
   findPromptText,
-  buildInjectMap,
+  buildInjectMapFromBindings,
   prepareStepsForRun,
   shortHost,
 } from './workflowUtils.js';
 
 let aborted = false;
 
-export function stopWorkflow() { aborted = true; }
+export function stopWorkflow() {
+  aborted = true;
+  const store = useStore.getState();
+  if (!store.running) return;
+  store.pushLog({ level: 'warn', msg: '⏹ Stop requested — đang dừng…' });
+  window.obsidian?.bridge?.abortAll?.().catch(() => {});
+}
 
 export async function runWorkflow() {
   const store = useStore.getState();
@@ -72,13 +78,25 @@ export async function runWorkflow() {
       inputs[e.source] = outputs[e.source];
     }
 
+    const nodesSnapshot = useStore.getState().nodes;
+
     try {
-      const output = await executeNode(node, inputs, store, nodes, edges);
+      const output = await executeNode(node, inputs, store, nodesSnapshot, edges, outputs);
+      if (aborted) {
+        store.setNodeStatus(nodeId, null);
+        store.pushLog({ nodeId, level: 'warn', msg: `⏹ ${node.data.label} stopped` });
+        break;
+      }
       outputs[nodeId] = output;
       useStore.getState().updateNodeData(nodeId, { _output: output });
       store.setNodeStatus(nodeId, 'done');
       store.pushLog({ nodeId, level: 'info', msg: `✓ ${node.data.label} done` });
     } catch (err) {
+      if (aborted || err.message === 'Aborted by user') {
+        store.setNodeStatus(nodeId, null);
+        store.pushLog({ nodeId, level: 'warn', msg: `⏹ ${node.data.label} stopped` });
+        break;
+      }
       store.setNodeStatus(nodeId, 'errored');
       store.pushLog({ nodeId, level: 'error', msg: `✗ ${node.data.label}: ${err.message}` });
       // Stop the whole pipeline on error unless node opts to continue
@@ -88,9 +106,12 @@ export async function runWorkflow() {
     }
   }
 
-  store.setProgress(1, total, total);
+  if (!aborted) store.setProgress(1, total, total);
   store.setRunning(false);
-  store.pushLog({ level: 'info', msg: 'Workflow finished' });
+  store.pushLog({
+    level: aborted ? 'warn' : 'info',
+    msg: aborted ? 'Workflow stopped by user' : 'Workflow finished',
+  });
 }
 
 /* ============================================
@@ -122,7 +143,7 @@ function topoSort(nodes, edges) {
 /* ============================================
    NODE EXECUTORS — one per kind
    ============================================ */
-async function executeNode(node, inputs, store, nodes, edges) {
+async function executeNode(node, inputs, store, nodes, edges, outputsById = {}) {
   const { kind, data } = { kind: node.data.kind, data: node.data };
   const upstream = Object.values(inputs);
 
@@ -157,7 +178,7 @@ async function executeNode(node, inputs, store, nodes, edges) {
     case 'bridge':
       return await runBridge(node, upstream, store);
     case 'click_seq':
-      return await runClickSeq(node, upstream, store, nodes, edges);
+      return await runClickSeq(node, upstream, store, nodes, edges, outputsById);
 
     // ---------- GENERATION ----------
     case 'image_forge':
@@ -170,48 +191,34 @@ async function executeNode(node, inputs, store, nodes, edges) {
 
     // ---------- PROMPT FACTORY GENERATION NODES ----------
     case 'imageGen': {
-      const promptText = findPromptText(upstream);
-      const refImages  = upstream.flatMap(u => u?.items || []).filter(Boolean);
-      // Auto mode: if bridge URL + recorded actions are configured, replay them
-      if (data.bridge_url && data.actions?.length) {
-        const bridgeNode = {
-          ...node,
-          data: {
-            ...data,
-            url:        data.bridge_url,
-            injectInto: data.bridge_inject  || '',
-            grabFrom:   data.bridge_grab    || '',
-            grabAttr:   data.bridge_grab_attr || 'src',
-            waitFor:    data.bridge_wait    || '',
-            timeout:    data.bridge_timeout || 180,
-          },
-        };
-        return await runBridge(bridgeNode, upstream, store);
+      if (data.actions?.length && (data.bridge_url || data.url)) {
+        return await runBridge(legacyBridgeNode(node, data), upstream, store);
       }
-      store.pushLog({ nodeId: node.id, level: 'warn', msg: `[imageGen] Prompt ready (${data.model}) — paste into AI tool, then upload result` });
-      return { type: 'imageGen', model: data.model, aspectRatio: data.aspectRatio, promptText, refImages, items: data._output?.items || [] };
+      const refImages = upstream.flatMap(u => u?.items || []).filter(Boolean);
+      return await runWebTask(node, upstream, store, nodes, edges, {
+        outputType: 'imageGen',
+        logLabel: `imageGen (${data.model || 'AI'})`,
+        extra: { model: data.model, aspectRatio: data.aspectRatio, refImages },
+        outputsById,
+      });
     }
 
     case 'videoGen': {
-      const motionPrompt = findPromptText(upstream);
-      const inputImages  = upstream.flatMap(u => u?.items || []).filter(Boolean);
-      if (data.bridge_url && data.actions?.length) {
-        const bridgeNode = {
-          ...node,
-          data: {
-            ...data,
-            url:        data.bridge_url,
-            injectInto: data.bridge_inject   || '',
-            grabFrom:   data.bridge_grab     || '',
-            grabAttr:   data.bridge_grab_attr || 'src',
-            waitFor:    data.bridge_wait     || '',
-            timeout:    data.bridge_timeout  || 180,
-          },
-        };
-        return await runBridge(bridgeNode, upstream, store);
+      if (data.actions?.length && (data.bridge_url || data.url)) {
+        return await runBridge(legacyBridgeNode(node, data), upstream, store);
       }
-      store.pushLog({ nodeId: node.id, level: 'warn', msg: `[videoGen] Ready (${data.model} · ${data.duration}s · ${inputImages.length} imgs) — generate manually` });
-      return { type: 'videoGen', model: data.model, duration: data.duration, aspectRatio: data.aspectRatio, motionPrompt, inputImages, items: data._output?.items || [] };
+      const inputImages = upstream.flatMap(u => u?.items || []).filter(Boolean);
+      return await runWebTask(node, upstream, store, nodes, edges, {
+        outputType: 'videoGen',
+        logLabel: `videoGen (${data.model || 'AI'} · ${data.duration || 6}s)`,
+        extra: {
+          model: data.model,
+          duration: data.duration,
+          aspectRatio: data.aspectRatio,
+          inputImages,
+        },
+        outputsById,
+      });
     }
 
     case 'imageUpload': {
@@ -372,7 +379,10 @@ async function runBridge(node, upstream, store) {
 
   store.pushLog({ nodeId: id, level: 'info', msg: `Replaying ${data.actions.length} actions` });
   const replayRes = await bridge.replay(id, data.actions, params);
-  if (!replayRes.ok) throw new Error('Replay failed');
+  if (!replayRes.ok) {
+    if (replayRes.aborted || replayRes.error === 'Aborted by user') throw new Error('Aborted by user');
+    throw new Error(replayRes.error || 'Replay failed');
+  }
 
   // Wait for stable output
   if (data.waitFor) {
@@ -391,10 +401,35 @@ async function runBridge(node, upstream, store) {
   return { type: 'bridge_output', source: data.url, items };
 }
 
-async function runClickSeq(node, upstream, store, nodes, edges) {
+async function runClickSeq(node, upstream, store, nodes, edges, outputsById = {}) {
+  return runWebTask(node, upstream, store, nodes, edges, {
+    outputType: 'click_seq_output',
+    logLabel: 'click_seq',
+    outputsById,
+  });
+}
+
+function legacyBridgeNode(node, data) {
+  return {
+    ...node,
+    data: {
+      ...data,
+      url: data.bridge_url || data.url,
+      injectInto: data.bridge_inject || '',
+      grabFrom: data.bridge_grab || data.grabFrom || '',
+      grabAttr: data.bridge_grab_attr || data.grabAttr || 'src',
+      waitFor: data.bridge_wait || data.waitFor || '',
+      timeout: data.bridge_timeout || data.timeout || 180,
+    },
+  };
+}
+
+async function runWebTask(node, upstream, store, nodes, edges, opts = {}) {
   const { data, id } = node;
   const bridge = window.obsidian.bridge;
   const steps = Array.isArray(data.steps) ? data.steps : [];
+  const outputType = opts.outputType || 'click_seq_output';
+  const logLabel = opts.logLabel || data.label || data.kind;
 
   if (steps.length === 0) {
     throw new Error('Chưa có steps — mở Inspector tab clicks và Pick Click');
@@ -402,36 +437,59 @@ async function runClickSeq(node, upstream, store, nodes, edges) {
 
   const url = resolveUrlForClickSeq(node, nodes, edges, upstream);
   const sessionId = data.sessionId || id;
+  const grabFrom = data.grabFrom || data.bridge_grab;
+  const grabAttr = data.grabAttr || data.bridge_grab_attr || 'src';
+  const waitFor = data.waitFor || data.bridge_wait;
+  const timeout = data.timeout || data.bridge_timeout || 180;
 
   store.pushLog({
     nodeId: id,
     level: 'info',
-    msg: `Opening click sequence → ${url ? shortHost(url) : 'no URL'}`,
+    msg: `[${logLabel}] Running ${steps.length} steps → ${url ? shortHost(url) : 'no URL'}`,
   });
 
   await bridge.open(id, url || 'about:blank', sessionId);
   useStore.getState().setBridgeSessionOpen(sessionId, true);
 
   const stepsToRun = prepareStepsForRun(steps, url);
-  const injectMap = buildInjectMap(stepsToRun, findPromptText(upstream));
+  const injectMap = buildInjectMapFromBindings(
+    stepsToRun,
+    nodes,
+    edges,
+    id,
+    data.promptSlots || [],
+    opts.outputsById || {}
+  );
 
-  store.pushLog({ nodeId: id, level: 'info', msg: `Running ${stepsToRun.length} steps` });
   const runRes = await bridge.runSteps(id, stepsToRun, injectMap, sessionId);
-  if (!runRes.ok) throw new Error(runRes.error || 'Click sequence failed');
+  if (!runRes.ok) {
+    if (runRes.aborted || runRes.error === 'Aborted by user') throw new Error('Aborted by user');
+    throw new Error(runRes.error || 'Web task failed');
+  }
 
-  if (data.waitFor) {
-    store.pushLog({ nodeId: id, level: 'info', msg: `Waiting for ${data.waitFor}` });
-    await bridge.waitStable(id, data.waitFor, (data.timeout || 180) * 1000, sessionId);
+  if (waitFor) {
+    store.pushLog({ nodeId: id, level: 'info', msg: `Waiting for ${waitFor}` });
+    await bridge.waitStable(id, waitFor, timeout * 1000, sessionId);
   }
 
   let items = [];
-  if (data.grabFrom) {
-    const grab = await bridge.grabOutput(id, data.grabFrom, data.grabAttr || 'src', sessionId);
+  if (grabFrom) {
+    const grab = await bridge.grabOutput(id, grabFrom, grabAttr, sessionId);
     if (grab.ok) items = grab.result.filter(Boolean);
   }
 
-  store.pushLog({ nodeId: id, level: 'info', msg: `Grabbed ${items.length} outputs · browser left open` });
-  return { type: 'click_seq_output', source: url, items };
+  store.pushLog({
+    nodeId: id,
+    level: 'info',
+    msg: `Grabbed ${items.length} outputs · browser left open`,
+  });
+
+  return {
+    type: outputType,
+    source: url,
+    items,
+    ...(opts.extra || {}),
+  };
 }
 
 /* ---- EXPORT ---- */

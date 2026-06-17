@@ -8,11 +8,12 @@ const COL_X = { upload:0, ref_prompt:480, ref_gen:960, sb_prompt:1440, sb_gen:19
 const Y_GEN = 360;
 let _seq = Date.now();
 const nid = () => `node-${++_seq}`;
-const mkEdge = (s, t) => ({
+const mkEdge = (s, t, opts = {}) => ({
   type: 'default',
   markerEnd: { type: 'arrowclosed', color: 'rgba(255,255,255,0.35)' },
   source: s, target: t,
-  id: `xy-edge__${s}-${t}`,
+  targetHandle: opts.targetHandle,
+  id: `xy-edge__${s}-${t}${opts.targetHandle ? '-' + opts.targetHandle : ''}`,
 });
 const pNode = (text, x, y) => ({ id: nid(), type: 'prompt',      position: { x, y }, data: { label: 'Prompt Nhập liệu', status: 'idle', params: { text } } });
 const iNode = (model, aspect, x, y) => ({ id: nid(), type: 'imageGen',   position: { x, y }, data: { label: 'Tạo Ảnh AI',   status: 'idle', params: { aspectRatio: aspect, model, batchCount: 1 } } });
@@ -36,8 +37,8 @@ function compileFlow(m) {
     const y = i * Y_GEN;
     const p = pNode(a.prompt, COL_X.ref_prompt, y);
     const g = iNode(imgM, a.aspect || asp, COL_X.ref_gen, y);
-    nodes.push(p, g); edges.push(mkEdge(p.id, g.id));
-    if (a.use_upload && (m.uploads || []).length) edges.push(mkEdge(idMap[m.uploads[0].id], g.id));
+    nodes.push(p, g); edges.push(mkEdge(p.id, g.id, { targetHandle: 'prompt-1' }));
+    if (a.use_upload && (m.uploads || []).length) edges.push(mkEdge(idMap[m.uploads[0].id], g.id, { targetHandle: 'image' }));
     idMap[a.id] = g.id;
   });
 
@@ -50,19 +51,19 @@ function compileFlow(m) {
     const vp = pNode(s.video_prompt, COL_X.vid_prompt, y);
     const vg = vNode(vidM, s.aspect || asp, dur, COL_X.vid_gen, y);
     nodes.push(sp, sg, vp, vg);
-    edges.push(mkEdge(sp.id, sg.id));
+    edges.push(mkEdge(sp.id, sg.id, { targetHandle: 'prompt-1' }));
     (s.refs || []).forEach(r => {
       if (!idMap[r]) throw new Error(`Shot ${s.id}: ref '${r}' không tồn tại`);
-      edges.push(mkEdge(idMap[r], sg.id));
+      edges.push(mkEdge(idMap[r], sg.id, { targetHandle: 'image' }));
     });
     if (s.env) {
       if (!idMap[s.env]) throw new Error(`Shot ${s.id}: env '${s.env}' không tồn tại`);
-      edges.push(mkEdge(idMap[s.env], sg.id));
+      edges.push(mkEdge(idMap[s.env], sg.id, { targetHandle: 'image' }));
     }
-    edges.push(mkEdge(sg.id, vg.id));
-    edges.push(mkEdge(vp.id, vg.id));
-    (s.refs_to_video || []).forEach(r => edges.push(mkEdge(idMap[r], vg.id)));
-    if (s.upload_to_video && (m.uploads || []).length) edges.push(mkEdge(idMap[m.uploads[0].id], vg.id));
+    edges.push(mkEdge(sg.id, vg.id, { targetHandle: 'image' }));
+    edges.push(mkEdge(vp.id, vg.id, { targetHandle: 'prompt-1' }));
+    (s.refs_to_video || []).forEach(r => edges.push(mkEdge(idMap[r], vg.id, { targetHandle: 'image' })));
+    if (s.upload_to_video && (m.uploads || []).length) edges.push(mkEdge(idMap[m.uploads[0].id], vg.id, { targetHandle: 'image' }));
     vids.push(vg.id);
   });
 
@@ -73,14 +74,25 @@ function compileFlow(m) {
 
   // validate
   const byId = {}; nodes.forEach(n => byId[n.id] = n);
-  const fan  = {}; edges.forEach(e => { if (byId[e.source].type === 'prompt') fan[e.target] = (fan[e.target] || 0) + 1; });
+  const promptFan = {};
+  edges.forEach(e => {
+    const src = byId[e.source];
+    if (!src || src.type !== 'prompt') return;
+    if (e.targetHandle?.startsWith('prompt-') || !e.targetHandle) {
+      promptFan[e.target] = (promptFan[e.target] || 0) + 1;
+    }
+  });
   const linked = new Set(); edges.forEach(e => { linked.add(e.source); linked.add(e.target); });
   const errs = [];
   nodes.forEach(n => {
-    if (['imageGen', 'videoGen'].includes(n.type) && (fan[n.id] || 0) !== 1)
-      errs.push(`${n.id} (${n.type}): có ${fan[n.id] || 0} prompt vào (cần đúng 1)`);
-    if (n.type === 'videoGen' && !edges.some(e => e.target === n.id && ['imageGen', 'imageUpload'].includes(byId[e.source].type)))
-      errs.push(`${n.id} (videoGen): không có dây ảnh đầu vào`);
+    if (n.type === 'imageGen' && (promptFan[n.id] || 0) < 1)
+      errs.push(`${n.id} (imageGen): cần ít nhất 1 prompt vào cổng Prompt`);
+    if (n.type === 'videoGen') {
+      if ((promptFan[n.id] || 0) < 1)
+        errs.push(`${n.id} (videoGen): cần ít nhất 1 prompt vào cổng Prompt`);
+      if (!edges.some(e => e.target === n.id && e.targetHandle === 'image' && ['imageGen', 'imageUpload'].includes(byId[e.source]?.type)))
+        errs.push(`${n.id} (videoGen): không có dây ảnh vào cổng Image`);
+    }
     if (!linked.has(n.id)) errs.push(`${n.id} (${n.type}): node mồ côi`);
   });
   if (errs.length) throw new Error('COMPILE FAIL:\n  ' + errs.join('\n  '));
@@ -91,6 +103,13 @@ function buildMegaPrompt(f) {
   const style = f.style && f.style.trim()
     ? f.style.trim()
     : 'Luxury - Elegant - Mysterious: cinematic tech-noir, chiaroscuro, rose gold + obsidian, brushed metal, 35mm anamorphic, slow seamless camera moves';
+  const hasImg = f.img === 'yes';
+  const uploadsLine = hasImg
+    ? '  "uploads": [ { "id": "UP_PRODUCT", "label": "Ảnh sản phẩm thật" } ],'
+    : '  "uploads": [],';
+  const uploadRule = hasImg
+    ? '□ uploads có UP_PRODUCT → ít nhất 1 ref_assets (ref sản phẩm) phải use_upload:true'
+    : '□ uploads phải là [] — mọi use_upload và upload_to_video phải false';
   return [
     'Bạn là PROMPT FACTORY ENGINE — hệ thống sản xuất prompt TVC chuyên nghiệp. Thực hiện đúng quy trình, đầu ra CHỈ là 1 khối JSON manifest, không giải thích thêm.',
     '',
@@ -100,8 +119,8 @@ function buildMegaPrompt(f) {
     'TỔNG THỜI LƯỢNG: ~' + (f.dur || '30') + 's | ASPECT: ' + f.aspect,
     'STYLE: ' + style,
     'MODEL: image="' + f.imodel + '", video="' + f.vmodel + '"',
-    f.img === 'yes'
-      ? 'ẢNH SẢN PHẨM: ĐÍNH KÈM — phân tích kỹ (hình dáng, chất liệu, màu, chi tiết đặc trưng, đèn, bánh...) để viết Product Block chính xác. Trong manifest đặt uploads=[{id:\'UP_PRODUCT\',label:\'Ảnh sản phẩm thật\'}] và use_upload=true cho ref sheet sản phẩm.'
+    hasImg
+      ? 'ẢNH SẢN PHẨM: ĐÍNH KÈM — phân tích kỹ (hình dáng, chất liệu, màu, chi tiết đặc trưng, đèn, bánh...) để viết Product Block chính xác. Trong manifest đặt uploads=[{id:\'UP_PRODUCT\',label:\'Ảnh sản phẩm thật\'}] và use_upload=true cho ref sheet sản phẩm chính.'
       : 'ẢNH SẢN PHẨM: KHÔNG CÓ — mô tả từ brief, uploads=[].',
     f.vid === 'yes'
       ? 'VIDEO MẪU: ĐÍNH KÈM — phân tích style (lighting, palette, nhịp camera) và hòa vào Style DNA.'
@@ -114,12 +133,12 @@ function buildMegaPrompt(f) {
     '4. Viết prompt tiếng Anh cho: (a) mỗi entity 1 reference sheet (character: turnaround 4 góc + 3 biểu cảm + chi tiết 2 bàn tay đủ 5 ngón; product: 5 góc + macro; tính năng: 5 trạng thái tuần tự); (b) mỗi shot 1 storyboard grid — số panel: 4s=4 (2x2), 6s=6 (2x3), 8s=8 (2x4), 10s=10 (2x5), mô tả TỪNG panel theo diễn tiến đều của 1 cú máy, nhúng đủ Block; (c) mỗi shot 1 video motion prompt dạng: [Subject Action] / [Camera Move] / [Tempo] / [Maintain] / [Duration] / [Negative Motion].',
     '5. LỌC ToS: không tên người thật/celebrity, không logo-thương hiệu bên thứ 3, không IP bản quyền, không nội dung 18+/bạo lực/trẻ em nhạy cảm, không từ kích hoạt filter. Mọi prompt kèm NEGATIVE.',
     '',
-    '=== OUTPUT: CHỈ 1 KHỐI JSON THEO SCHEMA NÀY ===',
+    '=== OUTPUT: CHỈ 1 KHỐI JSON THEO SCHEMA NÀY (giữ nguyên keys, chỉ điền nội dung) ===',
     '{',
-    '  "project": "TEN_DU_AN",',
+    '  "project": "' + (f.name || 'TVC_Project') + '",',
     '  "models": { "image": "' + f.imodel + '", "video": "' + f.vmodel + '" },',
     '  "aspect": "' + f.aspect + '",',
-    '  "uploads": [ { "id": "UP_PRODUCT", "label": "Ảnh sản phẩm thật" } ],',
+    uploadsLine,
     '  "ref_assets": [ { "id": "REF_...", "prompt": "<full EN prompt + NEGATIVE>", "use_upload": true|false } ],',
     '  "env_plates": [ { "id": "ENV_...", "prompt": "<full EN prompt + NEGATIVE>" } ],',
     '  "shots": [ { "id": "S01", "duration": 4|6|8|10,',
@@ -130,15 +149,220 @@ function buildMegaPrompt(f) {
     '  "stitch": true',
     '}',
     '',
-    'Kiểm tra trước khi xuất: mọi refs/env trong shots phải tồn tại trong ref_assets/env_plates; duration đúng tập {4,6,8,10}; JSON hợp lệ. Xuất JSON trong code block.',
+    '=== CHECKLIST COMPILE (bắt buộc trước khi xuất) ===',
+    '□ CHỈ 1 object JSON — không text trước/sau, không 2 khối JSON',
+    '□ duration mỗi shot là số nguyên thuộc {4,6,8,10}',
+    '□ mọi refs trong shots tồn tại trong ref_assets',
+    '□ mọi env trong shots tồn tại trong env_plates (hoặc null)',
+    uploadRule,
+    '□ JSON hợp lệ, xuất trong 1 code block ```json',
   ].join('\n');
 }
 
+function extractBalancedJSONObject(s) {
+  const start = s.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0, inString = false, escape = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 function extractJSON(s) {
-  s = s.trim().replace(/^```(json)?/m, '').replace(/```$/m, '').trim();
-  const a = s.indexOf('{'), b = s.lastIndexOf('}');
-  if (a < 0 || b < 0) throw new Error('Không tìm thấy JSON trong nội dung dán vào.');
-  return JSON.parse(s.slice(a, b + 1));
+  s = s.trim().replace(/```(?:json)?/gi, '').trim();
+  try {
+    const parsed = JSON.parse(s);
+    if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+  } catch { /* fall through */ }
+  const block = extractBalancedJSONObject(s);
+  if (!block) throw new Error('Không tìm thấy JSON trong nội dung dán vào.');
+  const rest = s.slice(s.indexOf(block) + block.length).trim();
+  if (rest.startsWith('{')) {
+    throw new Error('Có nhiều khối JSON — chỉ giữ 1 object manifest.');
+  }
+  try {
+    return JSON.parse(block);
+  } catch (e) {
+    throw new Error('JSON không hợp lệ: ' + e.message);
+  }
+}
+
+function hasUploadWire(m) {
+  if ((m.ref_assets || []).some(r => r.use_upload)) return true;
+  if ((m.shots || []).some(s => s.upload_to_video)) return true;
+  return false;
+}
+
+function findProductRef(refs) {
+  return refs.find(r => /product/i.test(r.id))
+    || refs.find(r => r.id.startsWith('REF_') && !/char|character/i.test(r.id));
+}
+
+function normalizeManifest(raw, opts = {}) {
+  const warnings = [];
+  const m = JSON.parse(JSON.stringify(raw));
+  const wantsUpload = opts.hasProductImage === true || opts.hasProductImage === 'yes';
+
+  if (!m.project) {
+    m.project = opts.name || 'TVC_Project';
+    warnings.push('Thêm project từ Brief.');
+  }
+  if (!m.models) {
+    m.models = { image: opts.imodel || '🍌 Nano Banana Pro', video: opts.vmodel || 'Omni Flash' };
+    warnings.push('Thêm models mặc định từ Brief.');
+  }
+  if (!m.aspect) {
+    m.aspect = opts.aspect || '16:9';
+    warnings.push('Thêm aspect mặc định.');
+  }
+  if (m.stitch === undefined) {
+    m.stitch = true;
+    warnings.push('Thêm stitch: true.');
+  }
+  if (!Array.isArray(m.uploads)) {
+    m.uploads = [];
+    warnings.push('uploads không hợp lệ — đặt [].');
+  }
+  if (!Array.isArray(m.ref_assets)) m.ref_assets = [];
+  if (!Array.isArray(m.env_plates)) m.env_plates = [];
+  if (!Array.isArray(m.shots)) m.shots = [];
+
+  m.ref_assets.forEach(r => {
+    if (r.use_upload === undefined) r.use_upload = false;
+  });
+
+  m.shots.forEach(s => {
+    if (s.upload_to_video === undefined) s.upload_to_video = false;
+    if (!Array.isArray(s.refs)) s.refs = [];
+    if (!Array.isArray(s.refs_to_video)) s.refs_to_video = [];
+    const dur = parseInt(s.duration, 10);
+    if (!Number.isNaN(dur) && s.duration !== dur) {
+      warnings.push(`Shot ${s.id || '?'}: duration ${s.duration} → ${dur}`);
+      s.duration = dur;
+    }
+  });
+
+  if (!wantsUpload && m.uploads.length > 0) {
+    warnings.push('Brief không có ảnh sản phẩm — xóa uploads[].');
+    m.uploads = [];
+  }
+
+  if (m.uploads.length > 0 && !hasUploadWire(m)) {
+    const productRef = findProductRef(m.ref_assets);
+    if (productRef) {
+      productRef.use_upload = true;
+      warnings.push(`Tự bật use_upload:true cho ${productRef.id}.`);
+    } else {
+      warnings.push('uploads không được nối dây — xóa uploads[].');
+      m.uploads = [];
+    }
+  }
+
+  if (wantsUpload && m.uploads.length === 0) {
+    m.uploads = [{ id: 'UP_PRODUCT', label: 'Ảnh sản phẩm thật' }];
+    warnings.push('Brief có ảnh sản phẩm — thêm uploads UP_PRODUCT.');
+    const productRef = findProductRef(m.ref_assets);
+    if (productRef && !productRef.use_upload) {
+      productRef.use_upload = true;
+      warnings.push(`Tự bật use_upload:true cho ${productRef.id}.`);
+    }
+  }
+
+  if (m.uploads.length === 0) {
+    m.ref_assets.forEach(r => {
+      if (r.use_upload) {
+        r.use_upload = false;
+        warnings.push(`${r.id}: tắt use_upload (không có uploads).`);
+      }
+    });
+    m.shots.forEach(s => {
+      if (s.upload_to_video) {
+        s.upload_to_video = false;
+        warnings.push(`Shot ${s.id}: tắt upload_to_video.`);
+      }
+    });
+  }
+
+  return { manifest: m, warnings };
+}
+
+function validateManifestSchema(m) {
+  const errors = [];
+  if (!m.project) errors.push('Thiếu project.');
+  if (!m.models?.image || !m.models?.video) errors.push('Thiếu models.image hoặc models.video.');
+  if (!m.aspect) errors.push('Thiếu aspect.');
+  if (!Array.isArray(m.shots) || m.shots.length === 0) errors.push('shots phải có ít nhất 1 shot.');
+
+  const refIds = new Set((m.ref_assets || []).map(r => r.id));
+  const envIds = new Set((m.env_plates || []).map(e => e.id));
+
+  (m.ref_assets || []).forEach(r => {
+    if (!r.id) errors.push('ref_assets có entry thiếu id.');
+    else if (!r.prompt) errors.push(`ref ${r.id}: thiếu prompt.`);
+  });
+
+  (m.env_plates || []).forEach(e => {
+    if (!e.id) errors.push('env_plates có entry thiếu id.');
+    else if (!e.prompt) errors.push(`env ${e.id}: thiếu prompt.`);
+  });
+
+  (m.shots || []).forEach(s => {
+    const dur = parseInt(s.duration, 10);
+    if (![4, 6, 8, 10].includes(dur)) {
+      errors.push(`Shot ${s.id || '?'}: duration ${s.duration} không thuộc 4/6/8/10.`);
+    }
+    if (!s.storyboard_prompt) errors.push(`Shot ${s.id || '?'}: thiếu storyboard_prompt.`);
+    if (!s.video_prompt) errors.push(`Shot ${s.id || '?'}: thiếu video_prompt.`);
+    (s.refs || []).forEach(r => {
+      if (!refIds.has(r)) errors.push(`Shot ${s.id}: ref '${r}' không tồn tại trong ref_assets.`);
+    });
+    if (s.env && !envIds.has(s.env)) {
+      errors.push(`Shot ${s.id}: env '${s.env}' không tồn tại trong env_plates.`);
+    }
+    (s.refs_to_video || []).forEach(r => {
+      if (!refIds.has(r)) errors.push(`Shot ${s.id}: refs_to_video '${r}' không tồn tại trong ref_assets.`);
+    });
+  });
+
+  if ((m.uploads || []).length > 0 && !hasUploadWire(m)) {
+    errors.push('uploads có dữ liệu nhưng không ref/shot nào use_upload hoặc upload_to_video.');
+  }
+
+  return errors;
+}
+
+function buildSkeletonManifest(imodel, vmodel, aspect, hasProductImage) {
+  const hasImg = hasProductImage === true || hasProductImage === 'yes';
+  return {
+    ...SKELETON,
+    models: { image: imodel, video: vmodel },
+    aspect,
+    uploads: hasImg ? [{ id: 'UP_PRODUCT', label: 'Ảnh sản phẩm thật' }] : [],
+    ref_assets: SKELETON.ref_assets.map(r =>
+      r.id === 'REF_PRODUCT' ? { ...r, use_upload: hasImg } : { ...r }
+    ),
+  };
+}
+
+function prepareManifestFromText(text, opts) {
+  const raw = extractJSON(text);
+  const { manifest, warnings } = normalizeManifest(raw, opts);
+  const errors = validateManifestSchema(manifest);
+  if (errors.length) throw new Error(errors.join('\n  '));
+  return { manifest, warnings };
 }
 
 const SKELETON = {
@@ -191,8 +415,11 @@ export default function StudioPanel({ onClose }) {
   // Tab 2 state
   const [manifest, setManifest] = useState(() => localStorage.getItem('pf_manifest') || '');
   const [compileMsg, setCompileMsg] = useState(null);
+  const [compileWarnings, setCompileWarnings] = useState([]);
   const [flow, setFlow] = useState(null);
   const [stats, setStats] = useState(null);
+
+  const manifestOpts = { hasProductImage: img === 'yes', imodel, vmodel, aspect, name };
 
   // Persist form fields to localStorage
   useEffect(() => { localStorage.setItem('pf_name',   name);   }, [name]);
@@ -219,9 +446,13 @@ export default function StudioPanel({ onClose }) {
   }
 
   function handleCompile() {
-    setFlow(null); setStats(null); setCompileMsg(null);
+    setFlow(null); setStats(null); setCompileMsg(null); setCompileWarnings([]);
     try {
-      const m = extractJSON(manifest);
+      const { manifest: m, warnings } = prepareManifestFromText(manifest, manifestOpts);
+      if (warnings.length) {
+        setManifest(JSON.stringify(m, null, 2));
+        setCompileWarnings(warnings);
+      }
       const compiled = compileFlow(m);
       const sz = Math.round(JSON.stringify(compiled).length / 1024);
       setFlow({ ...compiled, _projectName: m.project || 'project' });
@@ -232,7 +463,40 @@ export default function StudioPanel({ onClose }) {
         durations: (m.shots || []).map(s => s.duration + 's').join(' · '),
         size: sz,
       });
-      setCompileMsg({ ok: true, text: '✔ VALIDATE PASS — flow sẵn sàng import vào canvas.' });
+      const passText = warnings.length
+        ? `✔ VALIDATE PASS — bấm ⬇ DOWNLOAD .JSON → mở Flow AI → Import workflow.\n⚠ Đã tự sửa ${warnings.length} mục (xem bên dưới).`
+        : '✔ VALIDATE PASS — bấm ⬇ DOWNLOAD .JSON, lưu file flow_project_*.json, rồi Import vào Flow AI.';
+      setCompileMsg({ ok: true, text: passText });
+    } catch (e) {
+      setCompileMsg({ ok: false, text: '✗ ' + e.message });
+    }
+  }
+
+  function handleSanitize() {
+    setFlow(null); setStats(null); setCompileMsg(null); setCompileWarnings([]);
+    try {
+      const { manifest: m, warnings } = prepareManifestFromText(manifest, manifestOpts);
+      setManifest(JSON.stringify(m, null, 2));
+      setCompileWarnings(warnings);
+      setCompileMsg({
+        ok: true,
+        text: warnings.length
+          ? `✔ Đã chuẩn hóa manifest — ${warnings.length} mục tự sửa. Bấm VALIDATE + COMPILE để tạo flow.`
+          : '✔ Manifest hợp lệ — không cần sửa. Bấm VALIDATE + COMPILE để tạo flow.',
+      });
+    } catch (e) {
+      setCompileMsg({ ok: false, text: '✗ ' + e.message });
+    }
+  }
+
+  function handleDownloadManifest() {
+    try {
+      const { manifest: m } = prepareManifestFromText(manifest, manifestOpts);
+      const blob = new Blob([JSON.stringify(m, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `manifest_${m.project || 'project'}.json`;
+      a.click();
     } catch (e) {
       setCompileMsg({ ok: false, text: '✗ ' + e.message });
     }
@@ -255,10 +519,12 @@ export default function StudioPanel({ onClose }) {
     a.href = URL.createObjectURL(blob);
     a.download = `flow_project_${_projectName || 'project'}.json`;
     a.click();
+    pushToast('Đã tải flow JSON — mở Flow AI → Import workflow', 'info');
   }
 
   function handleLoadSkeleton() {
-    setManifest(JSON.stringify({ ...SKELETON, models: { image: imodel, video: vmodel }, aspect }, null, 2));
+    setFlow(null); setStats(null); setCompileMsg(null); setCompileWarnings([]);
+    setManifest(JSON.stringify(buildSkeletonManifest(imodel, vmodel, aspect, img), null, 2));
   }
 
   function handleFileLoad(e) {
@@ -281,7 +547,7 @@ export default function StudioPanel({ onClose }) {
           <div>
             <div className="gallery-eyebrow">PROMPT FACTORY</div>
             <h2 className="gallery-title">Studio</h2>
-            <p className="gallery-sub">Brief → Mega Prompt → Claude → Manifest → Flow → Canvas</p>
+            <p className="gallery-sub">Brief → Mega Prompt → Claude → Manifest → Export Flow → Import Flow AI</p>
           </div>
           <button className="gallery-close" onClick={onClose}>✕</button>
         </div>
@@ -391,13 +657,26 @@ export default function StudioPanel({ onClose }) {
 
                 <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
                   <button className="btn btn-primary" onClick={handleCompile}>VALIDATE + COMPILE</button>
+                  <button className="btn" onClick={handleSanitize}>CHUẨN HÓA</button>
                   <button className="btn" onClick={handleLoadSkeleton}>NẠP KHUNG MẪU</button>
+                  <button className="btn" onClick={handleDownloadManifest} style={{ fontSize: 10 }}>⬇ MANIFEST</button>
                 </div>
 
                 {compileMsg && (
                   <div style={{ marginTop: 10, fontSize: 11, whiteSpace: 'pre-wrap',
                     color: compileMsg.ok ? 'var(--signal)' : 'var(--danger)' }}>
                     {compileMsg.text}
+                  </div>
+                )}
+
+                {compileWarnings.length > 0 && (
+                  <div style={{
+                    marginTop: 10, padding: 10, fontSize: 11, whiteSpace: 'pre-wrap',
+                    background: 'rgba(255,180,0,0.08)', border: '1px solid rgba(255,180,0,0.25)',
+                    borderRadius: 6, color: 'var(--text-secondary)', lineHeight: 1.6,
+                  }}>
+                    <div style={{ fontWeight: 700, marginBottom: 4, color: '#e6b84d' }}>⚠ Tự sửa khi chuẩn hóa</div>
+                    {compileWarnings.map((w, i) => <div key={i}>· {w}</div>)}
                   </div>
                 )}
 
@@ -419,14 +698,31 @@ export default function StudioPanel({ onClose }) {
                 )}
 
                 {flow && (
-                  <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-                    <button className="btn btn-primary" onClick={handleImportToCanvas}>
-                      ⬆ IMPORT TO CANVAS
-                    </button>
-                    <button className="btn" onClick={handleDownload}>
-                      ⬇ DOWNLOAD .JSON
-                    </button>
-                  </div>
+                  <>
+                    <div style={{
+                      marginTop: 16, padding: 12, borderRadius: 8,
+                      background: 'rgba(201,169,110,0.08)', border: '1px solid rgba(201,169,110,0.28)',
+                      fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.65,
+                    }}>
+                      <div style={{ fontWeight: 700, color: 'var(--rose-gold)', marginBottom: 6, letterSpacing: '0.06em' }}>
+                        BƯỚC TIẾP THEO — ĐƯA VÀO FLOW AI
+                      </div>
+                      <div>1. Bấm <strong>⬇ DOWNLOAD .JSON</strong> — lưu file <code style={{ fontFamily: 'var(--font-mono)', fontSize: 10 }}>flow_project_*.json</code> xuống máy.</div>
+                      <div>2. Mở <strong>Flow AI</strong> → menu Import / Load workflow → chọn file vừa tải.</div>
+                      <div>3. Chạy pipeline trên Flow AI theo cột trái → phải (upload → ref → storyboard → video → stitch).</div>
+                      <div style={{ marginTop: 6, color: 'var(--text-dim)' }}>
+                        <strong>IMPORT TO CANVAS</strong> chỉ mở preview trên OBSIDIAN — không thay cho bước Import trên Flow AI.
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                      <button className="btn btn-primary" onClick={handleDownload}>
+                        ⬇ DOWNLOAD .JSON → FLOW AI
+                      </button>
+                      <button className="btn" onClick={handleImportToCanvas}>
+                        ⬆ IMPORT TO CANVAS (OBSIDIAN)
+                      </button>
+                    </div>
+                  </>
                 )}
               </Card>
             </div>
@@ -435,14 +731,15 @@ export default function StudioPanel({ onClose }) {
           {/* ===== TAB 3: GUIDE ===== */}
           {activeTab === 'guide' && (
             <div>
-              <Card title="QUY TRÌNH 5 BƯỚC">
+              <Card title="QUY TRÌNH 6 BƯỚC">
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 10 }}>
                   {[
                     ['1 · BRIEF', 'Điền tab ① → bấm TẠO MEGA PROMPT → COPY.'],
                     ['2 · CLAUDE DESKTOP', 'Dán vào Claude, đính kèm ảnh sản phẩm + video mẫu. Claude trả về 1 khối MANIFEST JSON.'],
-                    ['3 · COMPILE', 'Dán manifest vào tab ② → VALIDATE + COMPILE → bấm IMPORT TO CANVAS (hoặc tải .json).'],
-                    ['4 · CANVAS', 'Workflow nối dây tự động. Chạy theo cột trái→phải: upload ảnh → ref sheets → storyboards → videos → stitcher.'],
-                    ['5 · VALIDATE', 'Mỗi tầng kiểm: mặt/tay/tỷ lệ (ảnh) · flicker/morph/drift (video). Fail → sửa prompt trong node.'],
+                    ['3 · COMPILE', 'Tab ②: CHUẨN HÓA → VALIDATE + COMPILE → ⬇ DOWNLOAD flow_project_*.json.'],
+                    ['4 · FLOW AI', 'Mở Flow AI → Import workflow → chọn file .json vừa tải. Manifest không import trực tiếp được.'],
+                    ['5 · CANVAS / CHẠY', 'Trên Flow AI: upload ảnh → ref sheets → storyboards → videos → stitcher. OBSIDIAN canvas chỉ để preview tùy chọn.'],
+                    ['6 · VALIDATE', 'Mỗi tầng kiểm: mặt/tay/tỷ lệ (ảnh) · flicker/morph/drift (video). Fail → sửa prompt trong node.'],
                   ].map(([title, desc]) => (
                     <div key={title} style={{
                       background: 'rgba(0,0,0,0.4)', border: '1px solid var(--border-subtle)',

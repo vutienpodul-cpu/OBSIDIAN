@@ -12,6 +12,7 @@ import StudioPanel from './components/StudioPanel.jsx';
 import ToastStack from './components/ToastStack.jsx';
 import { useStore } from './store.js';
 import { useAccountStore } from './store/accountStore.js';
+import { stopWorkflow } from './engine/executor.js';
 
 export default function App() {
   const nodes = useStore(s => s.nodes);
@@ -26,6 +27,20 @@ export default function App() {
     if (nodes.length === 0) setShowGallery(true);
     // Load saved accounts
     loadAccounts();
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key !== 'Escape') return;
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (useStore.getState().running) {
+        e.preventDefault();
+        stopWorkflow();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   return (

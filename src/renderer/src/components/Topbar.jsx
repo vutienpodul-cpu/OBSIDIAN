@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useStore } from '../store.js';
 import { useAccountStore } from '../store/accountStore.js';
-import { runWorkflow } from '../engine/executor.js';
+import { runWorkflow, stopWorkflow } from '../engine/executor.js';
+import { webTaskNeedsSetup } from '../engine/workflowUtils.js';
 
 export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail, onOpenStudio }) {
   const projectName = useStore(s => s.projectName);
@@ -37,7 +38,7 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail, 
   }
 
   const bridgesNeedSetup = nodes.filter(n => n.data.kind === 'bridge' && !(n.data.actions || []).length).length;
-  const clickSeqNeedSetup = nodes.filter(n => n.data.kind === 'click_seq' && !(n.data.steps || []).length).length;
+  const webTaskNeedSetup = nodes.filter(n => webTaskNeedsSetup(n)).length;
   const emptyAccounts = accounts.filter(a => a.creditStatus === 'empty').length;
   const totalAccounts = accounts.length;
 
@@ -87,9 +88,9 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail, 
         </div>
       )}
 
-      {clickSeqNeedSetup > 0 && (
-        <div className="topbar-warning" title={`${clickSeqNeedSetup} Click Sequence chưa có steps`}>
-          ⚠ {clickSeqNeedSetup} clicks
+      {webTaskNeedSetup > 0 && (
+        <div className="topbar-warning" title={`${webTaskNeedSetup} web task node chưa có steps (Click Sequence / Image Gen / Video Gen)`}>
+          ⚠ {webTaskNeedSetup} web task
         </div>
       )}
 
@@ -120,10 +121,15 @@ export default function Topbar({ onNewWorkflow, onOpenAccounts, onOpenTempMail, 
       <button className="btn btn-icon" onClick={onSave}
         title={workflowFilePath ? `Lưu vào ${workflowFilePath}` : 'Lưu workflow (chọn file mới)'}>💾</button>
 
-      <button className="btn btn-primary" onClick={onRun} disabled={running}
-        style={{ padding: '7px 16px', fontSize: 11, letterSpacing: '0.04em' }}
-        title="Chạy toàn bộ workflow (Ctrl+R)">
-        {running ? '■ RUNNING' : '▶ RUN'}
+      <button
+        className={running ? 'btn' : 'btn btn-primary'}
+        onClick={() => (running ? stopWorkflow() : onRun())}
+        style={running
+          ? { padding: '7px 16px', fontSize: 11, letterSpacing: '0.04em', borderColor: 'rgba(220,40,85,0.45)', color: '#FF6B89' }
+          : { padding: '7px 16px', fontSize: 11, letterSpacing: '0.04em' }}
+        title={running ? 'Dừng workflow (Esc)' : 'Chạy toàn bộ workflow (Ctrl+R)'}
+      >
+        {running ? '■ STOP' : '▶ RUN'}
       </button>
 
       <div className="avatar" title="Vũ Tiến Minh">VM</div>

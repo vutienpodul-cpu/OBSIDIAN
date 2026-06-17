@@ -1,8 +1,14 @@
 /**
  * Universal node renderer for OBSIDIAN — one component, styling driven by data.cat.
  */
-import React, { memo } from 'react';
+import React, { memo, useMemo } from 'react';
 import { Handle, Position } from 'reactflow';
+import { useStore } from '../../store.js';
+import {
+  WEB_TASK_KINDS,
+  WEB_TASK_HANDLE_DEFS,
+  WEB_TASK_HANDLE_LABELS,
+} from '../../engine/workflowUtils.js';
 
 function summaryRowsFor(data) {
   // Small preview rows shown inside each node body
@@ -57,6 +63,20 @@ function summaryRowsFor(data) {
         { l: 'Session', v: data.sessionId || 'default' },
         { l: 'Delay', v: (data.delay||300)+'ms' },
       ];
+    case 'imageGen':
+      return [
+        { l: 'Model', v: data.model || '—' },
+        { l: 'Steps', v: (data.steps||[]).length },
+        { l: 'URL', v: shortUrl(data.url || data.bridge_url) },
+        { l: 'Setup', v: (data.steps||[]).length ? 'READY' : 'NEEDS SETUP' },
+      ];
+    case 'videoGen':
+      return [
+        { l: 'Model', v: data.model || '—' },
+        { l: 'Duration', v: (data.duration || 6) + 's' },
+        { l: 'Steps', v: (data.steps||[]).length },
+        { l: 'Setup', v: (data.steps||[]).length ? 'READY' : 'NEEDS SETUP' },
+      ];
     case 'bridge':
       return [
         { l: 'URL', v: shortUrl(data.url) },
@@ -108,11 +128,50 @@ function shortUrl(u) {
   catch { return u.slice(0, 24); }
 }
 
-function ObsidianNode({ data, selected }) {
+function WebTaskHandles({ nodeId, kind, edges }) {
+  const handles = WEB_TASK_HANDLE_DEFS[kind] || [];
+  const connected = useMemo(() => {
+    const set = new Set();
+    edges.filter(e => e.target === nodeId).forEach(e => {
+      if (e.targetHandle) set.add(e.targetHandle);
+    });
+    return set;
+  }, [edges, nodeId]);
+
+  const count = handles.length;
+  return handles.map((handleId, i) => {
+    const topPct = ((i + 1) / (count + 1)) * 100;
+    const label = WEB_TASK_HANDLE_LABELS[handleId] || handleId;
+    const isOn = connected.has(handleId);
+    return (
+      <React.Fragment key={handleId}>
+        <Handle
+          type="target"
+          position={Position.Left}
+          id={handleId}
+          className={`node-handle-${handleId.replace('-', '')}`}
+          style={{ top: `${topPct}%` }}
+        />
+        <span
+          className={`node-handle-label ${isOn ? 'connected' : ''}`}
+          style={{ top: `${topPct}%` }}
+        >
+          {label}
+        </span>
+      </React.Fragment>
+    );
+  });
+}
+
+function ObsidianNode({ id, data, selected }) {
+  const edges = useStore(s => s.edges);
   const rows = summaryRowsFor(data);
+  const isWebTask = WEB_TASK_KINDS.includes(data.kind);
+  const promptSlots = data.promptSlots || [];
   const status = data._status; // 'executing' | 'done' | 'errored'
   const classes = [
     'node',
+    isWebTask ? 'node-web-task' : '',
     `cat-${data.cat}`,
     selected ? 'selected' : '',
     status || ''
@@ -120,7 +179,10 @@ function ObsidianNode({ data, selected }) {
 
   return (
     <div className={classes}>
-      <Handle type="target" position={Position.Left}  id="in" />
+      {isWebTask
+        ? <WebTaskHandles nodeId={id} kind={data.kind} edges={edges} />
+        : <Handle type="target" position={Position.Left} id="in" />}
+
       <Handle type="source" position={Position.Right} id="out" />
 
       <div className="node-header">
@@ -130,6 +192,17 @@ function ObsidianNode({ data, selected }) {
       </div>
 
       <div className="node-body">
+        {isWebTask && promptSlots.length > 0 && (
+          <div className="node-prompt-slots">
+            {promptSlots.map((slot, i) => (
+              <div className="node-field" key={slot.handle || i}>
+                <span className="label">{slot.label || `Prompt ${i + 1}`}</span>
+                <span className="value">→ step {(slot.stepIndex ?? 0) + 1}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {rows.map((r,i) => (
           <div className="node-field" key={i}>
             <span className="label">{r.l}</span>

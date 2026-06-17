@@ -5,19 +5,66 @@ import { useAccountStore } from '../store/accountStore.js';
 import { getGuide } from '../data/nodeGuides.js';
 import {
   resolveUrlForClickSeq,
-  findPromptTextFromGraph,
-  buildInjectMap,
+  buildInjectMapFromBindings,
   prepareStepsForRun,
   shortHost,
+  WEB_TASK_KINDS,
+  typeStepIndices,
+  syncPromptSlotsFromEdges,
+  getPromptTextFromNode,
+  WEB_TASK_HANDLE_LABELS,
 } from '../engine/workflowUtils.js';
+import { WEB_TASK_PRESETS } from '../data/webTaskPresets.js';
+import { fallbacksToText, textToFallbacks } from '../engine/stepHelpers.js';
 
 export default function Inspector() {
   const selectedId = useStore(s => s.selectedId);
-  const node = useStore(s => s.nodes.find(n => n.id === selectedId));
+  const selectedIds = useStore(s => s.selectedIds);
+  const nodes = useStore(s => s.nodes);
+  const node = nodes.find(n => n.id === selectedId);
   const updateNodeData = useStore(s => s.updateNodeData);
   const removeNode = useStore(s => s.removeNode);
+  const removeNodes = useStore(s => s.removeNodes);
+  const selectNodes = useStore(s => s.selectNodes);
   const inspectorTabByNodeId = useStore(s => s.inspectorTabByNodeId);
   const setInspectorTab = useStore(s => s.setInspectorTab);
+
+  if (selectedIds.length > 1) {
+    const selectedNodes = nodes.filter(n => selectedIds.includes(n.id));
+    return (
+      <aside className="inspector">
+        <div className="insp-multi">
+          <div className="insp-eyebrow" style={{ color: 'var(--rose-gold)' }}>MULTI SELECT</div>
+          <div className="insp-multi-count">{selectedIds.length} nodes đang chọn</div>
+          <p style={{ fontSize: 10, color: 'var(--text-dim)', lineHeight: 1.6, margin: 0 }}>
+            Kéo để di chuyển cùng lúc · <kbd style={{ fontFamily: 'var(--font-mono)', fontSize: 9 }}>Del</kbd> xóa · click canvas để bỏ chọn
+          </p>
+          <div className="insp-multi-list">
+            {selectedNodes.map(n => {
+              const def = DEFS_BY_KIND[n.data.kind];
+              return (
+                <div key={n.id} className="insp-multi-item">
+                  <strong>{def?.name || n.data.label}</strong>
+                  {' · '}
+                  <span style={{ fontFamily: 'var(--font-mono)' }}>{n.id}</span>
+                </div>
+              );
+            })}
+          </div>
+          <button
+            className="btn"
+            style={{ width: '100%', borderColor: 'rgba(220,40,85,0.4)', color: '#FF6B89' }}
+            onClick={() => removeNodes(selectedIds)}
+          >
+            DELETE {selectedIds.length} NODES
+          </button>
+          <button className="btn" style={{ width: '100%' }} onClick={() => selectNodes([])}>
+            BỎ CHỌN TẤT
+          </button>
+        </div>
+      </aside>
+    );
+  }
 
   if (!node) {
     return (
@@ -27,12 +74,12 @@ export default function Inspector() {
           <h4>Chưa chọn node nào</h4>
           <p>Click một node để chỉnh sửa, hoặc kéo node mới từ thư viện.</p>
           <div className="insp-hint-box">
-            <strong>Gợi ý nhanh</strong>
+            <strong>Chọn nhiều node</strong>
             <ul>
-              <li>Kéo node từ panel trái vào canvas</li>
-              <li>Nối nodes bằng cách kéo từ chấm tròn phải sang trái</li>
-              <li>Browser Bridge: record thao tác → replay tự động</li>
-              <li>Nhấn <kbd>Ctrl+R</kbd> để chạy workflow</li>
+              <li><kbd>Shift</kbd>+kéo vùng trên canvas để box-select</li>
+              <li><kbd>Ctrl</kbd>/<kbd>⌘</kbd>+click để thêm/bớt node</li>
+              <li><kbd>Ctrl</kbd>+<kbd>A</kbd> chọn tất cả · <kbd>Del</kbd> xóa</li>
+              <li>Kéo 1 node đã chọn → di chuyển cả nhóm</li>
             </ul>
           </div>
         </div>
@@ -43,15 +90,17 @@ export default function Inspector() {
   const def = DEFS_BY_KIND[node.data.kind];
   const cat = CATEGORIES[node.data.cat];
   const isBridge = node.data.kind === 'bridge';
-  const isClickSeq = node.data.kind === 'click_seq';
+  const isWebTask = WEB_TASK_KINDS.includes(node.data.kind);
   const hasActions = isBridge && (node.data.actions || []).length > 0;
+  const hasSteps = (node.data.steps || []).length > 0;
+  const webTaskReady = isWebTask && hasSteps;
   const tabs = isBridge
     ? ['guide', 'props', 'record', 'accts', 'output', 'log']
-    : isClickSeq
-    ? ['guide', 'props', 'clicks', 'output', 'log']
+    : isWebTask
+    ? ['guide', 'props', 'prompts', 'clicks', 'output', 'log']
     : ['guide', 'props', 'data', 'output', 'log'];
 
-  const TAB_LABELS = { guide:'📖 guide', props:'props', record:'record', accts:'accts', output:'output', log:'log', data:'data', clicks:'👆 clicks' };
+  const TAB_LABELS = { guide:'📖 guide', props:'props', prompts:'💬 prompts', record:'record', accts:'accts', output:'output', log:'log', data:'data', clicks:'👆 clicks' };
   const tab = inspectorTabByNodeId[node.id] ?? 'guide';
 
   return (
@@ -62,6 +111,9 @@ export default function Inspector() {
           {node.data.label || def.name}
           {isBridge && <span className={`badge ${hasActions ? 'live' : 'warn'}`}>
             {hasActions ? 'READY' : 'NEEDS SETUP'}
+          </span>}
+          {isWebTask && <span className={`badge ${webTaskReady ? 'live' : 'warn'}`}>
+            {webTaskReady ? 'READY' : 'NEEDS SETUP'}
           </span>}
         </div>
         <div className="insp-sub">
@@ -82,14 +134,19 @@ export default function Inspector() {
         {tab === 'guide'  && <GuideTab kind={node.data.kind} />}
         {tab === 'props'  && (
           <PropertiesTab
-            def={isClickSeq
+            def={isWebTask
               ? { ...def, schema: def.schema.filter(f => !['steps', 'sessionId', 'delay'].includes(f.key)) }
               : def}
             data={node.data}
             onChange={(k, v) => updateNodeData(node.id, { [k]: v })}
           />
         )}
-        {isClickSeq && (
+        {isWebTask && (
+          <div style={{ display: tab === 'prompts' ? 'block' : 'none' }}>
+            <PromptSlotsTab node={node} updateData={p => updateNodeData(node.id, p)} />
+          </div>
+        )}
+        {isWebTask && (
           <div style={{ display: tab === 'clicks' ? 'block' : 'none' }}>
             <ClickSeqTab node={node} updateData={p => updateNodeData(node.id, p)} />
           </div>
@@ -496,6 +553,103 @@ function RecordingTab({ node, updateData }) {
   );
 }
 
+// ─── Prompt Slots Tab ────────────────────────────────────────────────────
+function PromptSlotsTab({ node, updateData }) {
+  const nodes = useStore(s => s.nodes);
+  const edges = useStore(s => s.edges);
+  const data = node.data;
+  const steps = Array.isArray(data.steps) ? data.steps : [];
+  const typeIdx = typeStepIndices(steps);
+  const slots = syncPromptSlotsFromEdges(
+    node.id, nodes, edges, steps, data.promptSlots || []
+  );
+
+  function updateSlot(handle, patch) {
+    const next = slots.map(s => s.handle === handle ? { ...s, ...patch } : s);
+    updateData({ promptSlots: next });
+  }
+
+  const imageEdge = edges.find(e => e.target === node.id && e.targetHandle === 'image');
+  const urlEdge = edges.find(e => e.target === node.id && e.targetHandle === 'url');
+  const imageSrc = imageEdge ? nodes.find(n => n.id === imageEdge.source) : null;
+  const urlSrc = urlEdge ? nodes.find(n => n.id === urlEdge.source) : null;
+
+  return (
+    <div className="cs-wrap">
+      <div className="insp-group">
+        <div className="insp-group-title">PROMPT INPUTS</div>
+        <div style={{ fontSize: 9.5, color: 'var(--text-dim)', lineHeight: 1.6, marginBottom: 10 }}>
+          Nối node <strong>Prompt</strong> vào cổng <strong>Prompt 1/2/3</strong> trên canvas.
+          Chọn step <code>type</code> tương ứng trong chuỗi Pick Click.
+        </div>
+
+        {slots.length === 0 ? (
+          <div className="cs-empty-hint" style={{ marginBottom: 12 }}>
+            <div className="cs-empty-icon">💬</div>
+            <div className="cs-empty-title">Chưa có prompt nào</div>
+            <div className="cs-empty-body">
+              Kéo dây từ node Prompt → cổng Prompt 1 (hoặc 2, 3) trên node này.
+            </div>
+          </div>
+        ) : slots.map(slot => {
+          const src = nodes.find(n => n.id === slot.sourceId);
+          const preview = getPromptTextFromNode(src);
+          return (
+            <div className="insp-group" key={slot.handle} style={{ marginBottom: 10, padding: 8, border: '1px solid var(--border-soft)', borderRadius: 6 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--rose-gold)', marginBottom: 6 }}>
+                {slot.label || WEB_TASK_HANDLE_LABELS[slot.handle]}
+              </div>
+              <div style={{ fontSize: 9, color: 'var(--text-dim)', marginBottom: 6 }}>
+                Từ: <code>{src?.data?.label || slot.sourceId}</code>
+                {preview && (
+                  <span style={{ display: 'block', marginTop: 4, color: 'var(--text-primary)' }}>
+                    “{preview.slice(0, 80)}{preview.length > 80 ? '…' : ''}”
+                  </span>
+                )}
+              </div>
+              <label style={{ fontSize: 9, color: 'var(--text-dim)', display: 'block', marginBottom: 4 }}>
+                Inject vào step
+              </label>
+              <select
+                className="insp-input"
+                value={slot.stepIndex ?? 0}
+                onChange={e => updateSlot(slot.handle, { stepIndex: parseInt(e.target.value, 10) })}
+              >
+                {typeIdx.length === 0 ? (
+                  <option value={0}>— Chưa có step type —</option>
+                ) : typeIdx.map(i => (
+                  <option key={i} value={i}>
+                    Step {i + 1}: {steps[i]?.label || steps[i]?.selector?.slice(0, 24) || 'type'}
+                  </option>
+                ))}
+              </select>
+              <input
+                className="insp-input"
+                style={{ marginTop: 6 }}
+                placeholder="Nhãn (vd: Motion prompt)"
+                value={slot.label || ''}
+                onChange={e => updateSlot(slot.handle, { label: e.target.value })}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="insp-group">
+        <div className="insp-group-title">OTHER INPUTS</div>
+        <div className="node-field" style={{ marginBottom: 6 }}>
+          <span className="label">Image</span>
+          <span className="value">{imageSrc ? imageSrc.data.label : '— chưa nối'}</span>
+        </div>
+        <div className="node-field">
+          <span className="label">URL</span>
+          <span className="value">{urlSrc ? shortHost(urlSrc.data.url) : (data.url ? shortHost(data.url) : '— chưa nối')}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Click Sequence Tab ──────────────────────────────────────────────────
 function ClickSeqTab({ node, updateData }) {
   const nodes = useStore(s => s.nodes);
@@ -507,10 +661,20 @@ function ClickSeqTab({ node, updateData }) {
   const [picking, setPicking] = useState(false);
   const [runState, setRunState] = useState('idle');
   const [runError, setRunError] = useState('');
+  const [healthByStep, setHealthByStep] = useState({});
+  const [healthSummary, setHealthSummary] = useState('');
 
   const sessionId = data.sessionId || node.id;
   const browserOpen = !!bridgeSessionOpen[sessionId];
   const resolvedUrl = resolveUrlForClickSeq(node, nodes, edges);
+  const promptSlots = syncPromptSlotsFromEdges(
+    node.id, nodes, edges, steps, data.promptSlots || []
+  );
+
+  function slotLabelForStep(stepIndex) {
+    const slot = promptSlots.find(s => s.stepIndex === stepIndex);
+    return slot?.label || (slot ? WEB_TASK_HANDLE_LABELS[slot.handle] : null);
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -572,8 +736,11 @@ function ClickSeqTab({ node, updateData }) {
     const newStep = {
       type: stepType,
       selector: info.selector,
+      selectors: (info.suggestedSelectors || []).filter(s => s && s !== info.selector),
+      attrs: info.attrs || {},
       label: info.text || info.tag || `step ${stepNum}`,
       value: '',
+      optional: false,
       x: info.x,
       y: info.y,
       delay: data.delay || 300,
@@ -602,15 +769,67 @@ function ClickSeqTab({ node, updateData }) {
     updateData({ steps: [...steps, { type, selector: '', label: type, value: '', delay: data.delay || 300 }] });
   }
 
+  function addManualStep(type) {
+    updateData({ steps: [...steps, { type, selector: '', selectors: [], attrs: {}, label: type, value: '', optional: false, delay: data.delay || 300 }] });
+  }
+
+  async function checkStepsHealth() {
+    if (!(await ensureBrowserOpen())) {
+      alert('Nhấn OPEN BROWSER trước.');
+      return;
+    }
+    setHealthSummary('Đang kiểm tra…');
+    const res = await window.obsidian.bridge.checkSteps(node.id, steps, sessionId);
+    if (!res.ok) {
+      setHealthSummary('');
+      alert('Check failed: ' + (res.error || 'Unknown'));
+      return;
+    }
+    const map = {};
+    let missing = 0;
+    let optionalMiss = 0;
+    for (const r of res.results || []) {
+      map[r.index] = r;
+      if (r.status === 'missing') missing++;
+      if (r.status === 'optional_missing' || r.status === 'optional_empty') optionalMiss++;
+    }
+    setHealthByStep(map);
+    if (missing > 0) {
+      setHealthSummary(`${missing} bước thiếu element · ${optionalMiss} optional sẽ skip`);
+    } else if (optionalMiss > 0) {
+      setHealthSummary(`OK · ${optionalMiss} optional sẽ skip khi chạy`);
+    } else {
+      setHealthSummary('Tất cả selector OK');
+    }
+  }
+
   async function runTest() {
     if (!(await ensureBrowserOpen())) {
       alert('Nhấn OPEN BROWSER trước.');
       return;
     }
+    const check = await window.obsidian.bridge.checkSteps(node.id, steps, sessionId);
+    if (check.ok) {
+      const map = {};
+      const hardMissing = (check.results || []).filter(r => r.status === 'missing');
+      for (const r of check.results || []) map[r.index] = r;
+      setHealthByStep(map);
+      if (hardMissing.length > 0) {
+        const lines = hardMissing.map(r => `Step ${r.index + 1}`).join(', ');
+        const go = window.confirm(
+          `${hardMissing.length} bước không tìm thấy element (${lines}).\n\nChạy RUN TEST anyway?`
+        );
+        if (!go) {
+          setHealthSummary(`${hardMissing.length} bước missing — hủy run`);
+          return;
+        }
+      }
+    }
     setRunState('running'); setRunError('');
     const stepsToRun = prepareStepsForRun(steps, resolvedUrl);
-    const promptText = findPromptTextFromGraph(node.id, nodes, edges);
-    const injectMap = buildInjectMap(stepsToRun, promptText);
+    const injectMap = buildInjectMapFromBindings(
+      stepsToRun, nodes, edges, node.id, data.promptSlots || []
+    );
     const res = await window.obsidian.bridge.runSteps(node.id, stepsToRun, injectMap, sessionId);
     if (res.ok) setRunState('done');
     else { setRunState('error'); setRunError(res.error || 'Unknown error'); }
@@ -651,6 +870,35 @@ function ClickSeqTab({ node, updateData }) {
         </div>
       )}
 
+      <div className="insp-group" style={{ marginBottom: 12 }}>
+        <div className="insp-group-title">PRESET</div>
+        <select
+          className="insp-input"
+          defaultValue=""
+          onChange={e => {
+            const key = e.target.value;
+            if (!key || !WEB_TASK_PRESETS[key]) return;
+            const p = WEB_TASK_PRESETS[key];
+            updateData({
+              steps: JSON.parse(JSON.stringify(p.steps)),
+              ...(p.url ? { url: p.url } : {}),
+              ...(p.grabFrom ? { grabFrom: p.grabFrom } : {}),
+              ...(p.waitFor ? { waitFor: p.waitFor } : {}),
+              ...(p.timeout ? { timeout: p.timeout } : {}),
+            });
+            e.target.value = '';
+          }}
+        >
+          <option value="">— Load preset skeleton —</option>
+          {Object.entries(WEB_TASK_PRESETS).map(([k, p]) => (
+            <option key={k} value={k}>{p.label}</option>
+          ))}
+        </select>
+        <div style={{ fontSize: 9, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.5 }}>
+          Preset chỉ là khung bước — điền Tool URL (tab props) và Pick Click lại selector.
+        </div>
+      </div>
+
       {/* Browser controls */}
       <div className="insp-group">
         <div className="insp-group-title" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -665,6 +913,15 @@ function ClickSeqTab({ node, updateData }) {
             ? <button className="btn btn-primary" style={{ flex: 1 }} onClick={openBrowser}>🌐 OPEN</button>
             : <button className="btn" style={{ flex: 1 }} onClick={closeBrowser}>✕ CLOSE</button>}
           <button
+            className="btn"
+            style={{ flex: 1 }}
+            onClick={checkStepsHealth}
+            disabled={steps.length === 0}
+            title="Kiểm tra selector trước khi chạy"
+          >
+            ✓ CHECK
+          </button>
+          <button
             className={`btn btn-primary ${runState === 'running' ? 'live' : ''}`}
             style={{ flex: 1,
               background: runState === 'done' ? 'var(--signal)' :
@@ -678,6 +935,9 @@ function ClickSeqTab({ node, updateData }) {
         {runState === 'error' && (
           <div style={{ fontSize: 9.5, color: 'var(--danger)', padding: '4px 0', lineHeight: 1.5 }}>{runError}</div>
         )}
+        {healthSummary && (
+          <div style={{ fontSize: 9.5, color: 'var(--text-dim)', padding: '4px 0', lineHeight: 1.5 }}>{healthSummary}</div>
+        )}
       </div>
 
       {/* Steps */}
@@ -687,8 +947,19 @@ function ClickSeqTab({ node, updateData }) {
           <button className="btn" style={{ padding: '2px 8px', fontSize: 9 }} onClick={copyJson} title="Copy JSON">📋</button>
         </div>
 
-        {steps.map((step, i) => (
-          <div className="cs-step" key={i}>
+        {steps.map((step, i) => {
+          const health = healthByStep[i];
+          const healthLabel = health?.status === 'ok' ? '✓'
+            : health?.status === 'missing' ? '✗'
+            : health?.status === 'optional_missing' || health?.status === 'optional_empty' ? '⊘'
+            : null;
+          const healthColor = health?.status === 'ok' ? 'var(--signal)'
+            : health?.status === 'missing' ? 'var(--danger)'
+            : health?.status === 'optional_missing' || health?.status === 'optional_empty' ? 'var(--warning)'
+            : 'var(--text-dim)';
+
+          return (
+          <div className={`cs-step ${step.optional ? 'cs-step-optional' : ''}`} key={i}>
             <div className="cs-step-head">
               <div className="cs-step-num" style={{ background: STEP_COLORS[step.type] || '#666' }}>{i + 1}</div>
               <select className="cs-type-sel" value={step.type}
@@ -702,8 +973,18 @@ function ClickSeqTab({ node, updateData }) {
               </select>
               <span className="cs-step-label" title={step.selector}>
                 {step.label || step.selector?.slice(0, 28) || '—'}
+                {step.optional && (
+                  <span className="cs-optional-badge">SKIP?</span>
+                )}
+                {healthLabel && (
+                  <span style={{ marginLeft: 6, fontSize: 8, color: healthColor, fontWeight: 700 }} title={health?.matchedSelector || health?.status}>
+                    {healthLabel}
+                  </span>
+                )}
                 {step.type === 'type' && !step.value && (
-                  <span style={{ marginLeft: 6, fontSize: 8, color: 'var(--signal)', fontWeight: 700 }}>INJECT</span>
+                  <span style={{ marginLeft: 6, fontSize: 8, color: 'var(--signal)', fontWeight: 700 }}>
+                    {slotLabelForStep(i) ? `← ${slotLabelForStep(i)}` : 'INJECT?'}
+                  </span>
                 )}
               </span>
               <button className="cs-btn-sm" onClick={() => moveStep(i, -1)} disabled={i === 0} title="Lên">↑</button>
@@ -727,16 +1008,38 @@ function ClickSeqTab({ node, updateData }) {
                 value={step.key || ''} onChange={e => updateStep(i, { key: e.target.value })} />
             ) : (
               <>
-                <input className="cs-input cs-selector" placeholder="CSS selector"
+                <input className="cs-input cs-selector" placeholder="CSS selector (primary)"
                   value={step.selector || ''} onChange={e => updateStep(i, { selector: e.target.value })} />
+                <textarea
+                  className="cs-input cs-fallbacks"
+                  placeholder={'Fallback selectors — mỗi dòng một selector\nvd: button[aria-pressed="false"]\nvd: button[class*="jFIDjn"]'}
+                  rows={2}
+                  value={fallbacksToText(step.selectors)}
+                  onChange={e => updateStep(i, { selectors: textToFallbacks(e.target.value) })}
+                />
+                <label className="cs-optional-row">
+                  <input
+                    type="checkbox"
+                    checked={!!step.optional}
+                    onChange={e => updateStep(i, { optional: e.target.checked })}
+                  />
+                  <span>Bỏ qua nếu không tìm thấy (optional)</span>
+                </label>
+                {step.attrs && Object.keys(step.attrs).length > 0 && (
+                  <details className="cs-attrs-details">
+                    <summary>Attrs từ Pick ({Object.keys(step.attrs).length})</summary>
+                    <pre className="cs-attrs-pre">{JSON.stringify(step.attrs, null, 2)}</pre>
+                  </details>
+                )}
                 {step.type === 'type' && (
-                  <input className="cs-input" placeholder='Giá trị (để trống = inject từ upstream)'
+                  <input className="cs-input" placeholder='Giá trị cố định (để trống = inject từ tab prompts)'
                     value={step.value || ''} onChange={e => updateStep(i, { value: e.target.value })} />
                 )}
               </>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Add step controls */}

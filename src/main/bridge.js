@@ -127,14 +127,59 @@ const CLICK_PICKER_SCRIPT = `
     window.__obsidianPickerActive = false;
   }
 
+  function collectAttrs(el) {
+    const attrs = {};
+    for (const a of el.attributes) {
+      const n = a.name;
+      if (n === 'class' || n === 'role' || n === 'type' || n === 'name' || n === 'id' ||
+          n.startsWith('aria-') || n.startsWith('data-')) {
+        attrs[n] = a.value;
+      }
+    }
+    return attrs;
+  }
+
+  function suggestedSelectors(el, attrs) {
+    const tag = el.tagName.toLowerCase();
+    const out = [];
+    const add = (s) => { if (s && !out.includes(s)) out.push(s); };
+
+    if (attrs.id) add('#' + CSS.escape(attrs.id));
+    if (attrs['data-testid']) add(tag + '[data-testid="' + attrs['data-testid'] + '"]');
+    if (attrs.name) add(tag + '[name="' + attrs.name + '"]');
+    if (attrs.placeholder) add(tag + '[placeholder="' + attrs.placeholder.replace(/"/g, '') + '"]');
+    if (attrs['aria-label']) add(tag + '[aria-label="' + attrs['aria-label'].replace(/"/g, '') + '"]');
+
+    for (const [k, v] of Object.entries(attrs)) {
+      if (!k.startsWith('aria-') || !v || k === 'aria-label') continue;
+      add(tag + '[' + k + '="' + String(v).replace(/"/g, '') + '"]');
+    }
+
+    if (attrs.class) {
+      attrs.class.split(/\s+/).filter(Boolean).forEach(cls => {
+        if (/^sc-[a-f0-9]/i.test(cls)) add(tag + '[class*="' + cls.slice(0, 14) + '"]');
+        else add(tag + '.' + CSS.escape(cls));
+      });
+    }
+
+    if (attrs.role) add('[role="' + attrs.role + '"]');
+    return out;
+  }
+
   function finishPick(el, e, action) {
     if (done) return;
     done = true;
     e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
 
+    const attrs = collectAttrs(el);
+    const pathSel = cssPath(el);
+    const suggested = suggestedSelectors(el, attrs).filter(s => s !== pathSel);
+
     window.__obsidianPicked = {
       action,
-      selector: cssPath(el),
+      selector: pathSel,
+      suggestedSelectors: suggested,
+      attrs,
       tag: el.tagName.toLowerCase(),
       text: (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || '').trim().slice(0, 80),
       isInput: ['input','textarea','select'].includes(el.tagName.toLowerCase()),
@@ -207,9 +252,124 @@ export class BridgeController {
     this.context = null;
     this.page = null;
     this.recording = false;
+    this.aborted = false;
   }
 
   emit(event) { this.onEvent(event); }
+
+  abort() {
+    this.aborted = true;
+    this.emit({ kind: 'replay', state: 'aborted' });
+  }
+
+  throwIfAborted() {
+    if (this.aborted) throw new Error('Aborted by user');
+  }
+
+  async interruptibleWait(ms) {
+    if (!this.page) return;
+    let left = Number(ms) || 0;
+    while (left > 0) {
+      this.throwIfAborted();
+      const chunk = Math.min(250, left);
+      await this.page.waitForTimeout(chunk);
+      left -= chunk;
+    }
+  }
+
+  stepSelectorList(step) {
+    const primary = step?.selector?.trim() ? [step.selector.trim()] : [];
+    const extra = Array.isArray(step?.selectors)
+      ? step.selectors.map(s => String(s).trim()).filter(Boolean)
+      : [];
+    return [...new Set([...primary, ...extra])];
+  }
+
+  async countSelector(selector) {
+    if (!this.page || !selector) return 0;
+    try {
+      return await this.page.locator(selector).count();
+    } catch {
+      return 0;
+    }
+  }
+
+  async resolveStepTarget(step, { timeout = 4000 } = {}) {
+    const list = this.stepSelectorList(step);
+    for (const sel of list) {
+      try {
+        await this.page.waitForSelector(sel, { timeout: Math.min(timeout, 2500) });
+        if (await this.countSelector(sel) > 0) {
+          return { found: true, selector: sel };
+        }
+      } catch { /* try next */ }
+    }
+    return { found: false, selector: null, selectors: list };
+  }
+
+  async checkSteps(steps) {
+    if (!this.page) throw new Error('Browser chưa mở');
+    const results = [];
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i];
+      if (!['click', 'right_click', 'type'].includes(s.type)) {
+        results.push({ index: i, status: 'n/a', type: s.type });
+        continue;
+      }
+      const list = this.stepSelectorList(s);
+      if (!list.length) {
+        results.push({
+          index: i,
+          status: s.optional ? 'optional_empty' : 'missing',
+          selectors: [],
+        });
+        continue;
+      }
+      let matched = null;
+      for (const sel of list) {
+        if (await this.countSelector(sel) > 0) {
+          matched = sel;
+          break;
+        }
+      }
+      if (matched) {
+        results.push({ index: i, status: 'ok', matchedSelector: matched, selectors: list });
+      } else if (s.optional) {
+        results.push({ index: i, status: 'optional_missing', selectors: list });
+      } else {
+        results.push({ index: i, status: 'missing', selectors: list });
+      }
+    }
+    return results;
+  }
+
+  async clickStep(s, button = 'left') {
+    const resolved = await this.resolveStepTarget(s);
+    if (!resolved.found) {
+      if (s.optional) return { skipped: true, reason: 'optional' };
+      if (s.x != null && s.y != null) {
+        await this.page.mouse.click(s.x, s.y, button === 'right' ? { button: 'right' } : undefined);
+        return { skipped: false, used: 'coords' };
+      }
+      throw new Error(`Không tìm thấy element: ${(resolved.selectors || []).join(' | ')}`);
+    }
+    await this.page.click(resolved.selector, {
+      timeout: 5000,
+      button: button === 'right' ? 'right' : 'left',
+    });
+    return { skipped: false, used: resolved.selector };
+  }
+
+  async typeStep(s, value) {
+    const resolved = await this.resolveStepTarget(s);
+    if (!resolved.found) {
+      if (s.optional) return { skipped: true, reason: 'optional' };
+      throw new Error(`Không tìm thấy ô input: ${this.stepSelectorList(s).join(' | ')}`);
+    }
+    await this.page.click(resolved.selector, { timeout: 5000 });
+    await this.page.fill(resolved.selector, String(value));
+    return { skipped: false, used: resolved.selector };
+  }
 
   async open(url) {
     await fs.mkdir(SESSION_ROOT(), { recursive: true });
@@ -279,9 +439,11 @@ export class BridgeController {
    */
   async runSteps(steps, injectMap = {}) {
     if (!this.page) throw new Error('Browser chưa mở');
+    this.aborted = false;
     this.emit({ kind: 'replay', state: 'started', total: steps.length });
 
     for (let i = 0; i < steps.length; i++) {
+      this.throwIfAborted();
       const s = steps[i];
       this.emit({ kind: 'replay', state: 'step', index: i, total: steps.length, action: s });
 
@@ -290,44 +452,45 @@ export class BridgeController {
           await this.page.goto(s.url || s.value, { waitUntil: 'domcontentloaded' });
 
         } else if (s.type === 'click') {
-          await this.page.waitForSelector(s.selector, { timeout: 10000 }).catch(() => null);
-          try {
-            await this.page.click(s.selector, { timeout: 5000 });
-          } catch {
-            if (s.x && s.y) await this.page.mouse.click(s.x, s.y);
-            else throw new Error(`Không tìm thấy element: ${s.selector}`);
+          this.throwIfAborted();
+          const r = await this.clickStep(s, 'left');
+          if (r.skipped) {
+            this.emit({ kind: 'replay', state: 'skipped', index: i, reason: 'optional:not found' });
           }
 
         } else if (s.type === 'right_click') {
-          await this.page.waitForSelector(s.selector, { timeout: 10000 }).catch(() => null);
-          try {
-            await this.page.click(s.selector, { button: 'right', timeout: 5000 });
-          } catch {
-            if (s.x && s.y) await this.page.mouse.click(s.x, s.y, { button: 'right' });
-            else throw new Error(`Không tìm thấy element: ${s.selector}`);
+          this.throwIfAborted();
+          const r = await this.clickStep(s, 'right');
+          if (r.skipped) {
+            this.emit({ kind: 'replay', state: 'skipped', index: i, reason: 'optional:not found' });
           }
 
         } else if (s.type === 'type') {
           const value = injectMap[i] !== undefined ? injectMap[i] : (s.value || '');
-          await this.page.waitForSelector(s.selector, { timeout: 10000 }).catch(() => null);
-          await this.page.click(s.selector, { timeout: 5000 });
-          await this.page.fill(s.selector, String(value));
+          this.throwIfAborted();
+          const r = await this.typeStep(s, value);
+          if (r.skipped) {
+            this.emit({ kind: 'replay', state: 'skipped', index: i, reason: 'optional:not found' });
+          }
 
         } else if (s.type === 'press') {
           await this.page.keyboard.press(s.key || 'Enter');
 
         } else if (s.type === 'wait') {
           const ms = Number(s.value) || 2000;
-          await this.page.waitForTimeout(ms);
+          await this.interruptibleWait(ms);
 
         } else if (s.type === 'screenshot') {
           await this.page.screenshot({ path: s.value || undefined });
         }
 
-        // Natural delay between steps
-        await this.page.waitForTimeout(s.delay || 300);
+        await this.interruptibleWait(s.delay || 300);
 
       } catch (err) {
+        if (this.aborted || err.message === 'Aborted by user') {
+          this.emit({ kind: 'replay', state: 'aborted', index: i });
+          throw new Error('Aborted by user');
+        }
         this.emit({ kind: 'replay', state: 'error', index: i, msg: err.message, step: s });
         throw err;
       }
@@ -354,8 +517,10 @@ export class BridgeController {
 
   async replay(actions, params = {}) {
     if (!this.page) throw new Error('No page open');
+    this.aborted = false;
     this.emit({ kind: 'replay', state: 'started', total: actions.length });
     for (let i = 0; i < actions.length; i++) {
+      this.throwIfAborted();
       const a = actions[i];
       this.emit({ kind: 'replay', state: 'step', index: i, total: actions.length, action: a });
       try {
@@ -364,8 +529,15 @@ export class BridgeController {
         else if (a.type === 'input') { await this.page.waitForSelector(a.selector, { timeout: 8000 }); const v = params[a.selector] !== undefined ? params[a.selector] : a.value; await this.page.fill(a.selector, String(v)); }
         else if (a.type === 'press') { await this.page.waitForSelector(a.selector, { timeout: 8000 }); await this.page.press(a.selector, a.key); }
         else if (a.type === 'goto') { await this.page.goto(a.url, { waitUntil: 'domcontentloaded' }); }
-        await this.page.waitForTimeout(180);
-      } catch (err) { this.emit({ kind: 'replay', state: 'error', index: i, msg: err.message }); throw err; }
+        await this.interruptibleWait(180);
+      } catch (err) {
+        if (this.aborted || err.message === 'Aborted by user') {
+          this.emit({ kind: 'replay', state: 'aborted', index: i });
+          throw new Error('Aborted by user');
+        }
+        this.emit({ kind: 'replay', state: 'error', index: i, msg: err.message });
+        throw err;
+      }
     }
     this.emit({ kind: 'replay', state: 'done' });
   }
@@ -373,7 +545,17 @@ export class BridgeController {
   async waitForStable(selector, timeout = 180000) {
     if (!this.page) throw new Error('No page open');
     this.emit({ kind: 'log', level: 'info', msg: `Waiting for stable: ${selector}` });
-    await this.page.waitForSelector(selector, { timeout });
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      this.throwIfAborted();
+      try {
+        await this.page.waitForSelector(selector, { timeout: Math.min(1000, deadline - Date.now()) });
+        break;
+      } catch {
+        if (Date.now() >= deadline) throw new Error(`Timeout waiting for ${selector}`);
+      }
+    }
+    const remaining = Math.max(0, deadline - Date.now());
     await this.page.evaluate(([sel, ms]) => new Promise((res, rej) => {
       const start = Date.now(); let last = Date.now();
       const t = document.querySelector(sel); if (!t) return rej('Selector vanished');
@@ -383,7 +565,8 @@ export class BridgeController {
         if (Date.now() - last > 2000) { clearInterval(iv); obs.disconnect(); res(); }
         else if (Date.now() - start > ms) { clearInterval(iv); obs.disconnect(); rej('Timeout'); }
       }, 200);
-    }), [selector, timeout]);
+    }), [selector, remaining]);
+    this.throwIfAborted();
     this.emit({ kind: 'log', level: 'info', msg: `Stable: ${selector}` });
   }
 
